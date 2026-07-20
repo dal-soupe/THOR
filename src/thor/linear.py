@@ -1,7 +1,6 @@
 import numpy as np
-from liberate.fhe.data_struct import DataStruct
 
-from .ckks import CkksEngine
+from .ckks import CkksEngine, FheData
 
 class ThorLinearEvaluator():
     def __init__(self, engine:CkksEngine):
@@ -10,7 +9,7 @@ class ThorLinearEvaluator():
         self.pre_encode_masks()
                 
     #Linear Operations
-    def pt_ct_matmul(self, w_t:np.ndarray[DataStruct], x_t: np.ndarray[DataStruct], mode ='block_diag_1') -> np.ndarray[DataStruct]:
+    def pt_ct_matmul(self, w_t: np.ndarray, x_t: np.ndarray, mode='block_diag_1') -> np.ndarray:
         """
         @param w_t: Array of model weight plaintexts. Array shape: (n_out_packed, n_diag, n_in_complex)
         @param x_t: Array of model input ciphetexts. Array shape: (n_in_complex,)
@@ -21,14 +20,14 @@ class ThorLinearEvaluator():
         """
         if w_t.shape[-1] != x_t.shape[0]:
             raise ValueError(f"n_in of W and x should be equal. n_in of w_t, x_t: {w_t.shape} {x_t.shape}")
-        lev = x_t[0].level_calc
+        lev = x_t[0].level
         n_diag = w_t.shape[-2]
         n_out_packed = w_t.shape[-3]
         # (a)Parallel diagonal matrix multiplication of submatrices
         ct_submatrices = self.parallel_diagonal_pt_ct_mult(w_t, x_t) #Level: l -> l+1 Shape: (n_out_packed, ll)
-        ct_out = np.full((n_out_packed,), None, dtype=DataStruct)
+        ct_out = np.full((n_out_packed,), None, dtype=object)
         for out in range(ct_submatrices.shape[-2]):
-            ct_temp = self.engine.level_up(ct_submatrices[out, 0], lev +2)
+            ct_temp = self.engine.level_down(ct_submatrices[out, 0], lev - 2)
             #(b) rotate internally to align the slots
             for l in range(1, n_diag):
                 if mode == 'block_diag_1':
@@ -40,7 +39,7 @@ class ThorLinearEvaluator():
             ct_out[out] = ct_temp
         return ct_out
 
-    def parallel_diagonal_pt_ct_mult(self, w_t:np.ndarray[DataStruct], x_t: np.ndarray[DataStruct]):
+    def parallel_diagonal_pt_ct_mult(self, w_t: np.ndarray, x_t: np.ndarray):
         """
         Calculates the block (lower) diagonals ciphertexts of WX.T
         @param w_t: Array of model weights plaintexts. Array shape: (n_out_packed, n_diag, n_in_complex)
@@ -50,7 +49,7 @@ class ThorLinearEvaluator():
         n_in_c = w_t.shape[-1]
         n_out_packed = w_t.shape[-3]
         ll = w_t.shape[-2]
-        ct_diags = np.full((n_out_packed, ll), None, dtype=DataStruct)
+        ct_diags = np.full((n_out_packed, ll), None, dtype=object)
         for out in range(n_out_packed):
             for l in range(ll):
                 ct_temp = self.engine.pt_ct_mult(w_t[out, l, 0], x_t[(16*out)%n_in_c]) #Level: l, scale: delta^2
@@ -61,18 +60,18 @@ class ThorLinearEvaluator():
                 ct_diags[out, l] = self.engine.rescale(ct_temp) #Level: l + 1, scale: delta
         return ct_diags
     
-    def transpose_upper_to_lower(self, u:np.ndarray[DataStruct]) -> np.ndarray[DataStruct]:
+    def transpose_upper_to_lower(self, u: np.ndarray) -> np.ndarray:
         """
         Transpose the encrypted matrix(upper diagonal cts -> lower diagonal cts)
         @param u: Array of upper diagonal ciphertexts
         @return: Array of lower diagonal ciphertexts
         """        
-        l_temp = np.ndarray((u.shape[0], 2), dtype=DataStruct)
+        l_temp = np.ndarray((u.shape[0], 2), dtype=object)
         # (x2) U0 | U1 | ...
         for i in range(4):
             n_diag=16*i
             delta = (((64-n_diag)%64)*16)%(2**15)
-            rot_i = self.engine.rotate_left(u[i], delta, self.engine.rot_keys[delta])            
+            rot_i = self.engine.rotate_left(u[i], delta)
             mask0 = self.masks['transpose']['mask0'][i]
             mask1 = self.masks['transpose']['mask1'][i]
             temp0 = self.engine.rescale(self.engine.pt_ct_mult(mask0, rot_i))
@@ -85,7 +84,7 @@ class ThorLinearEvaluator():
             for n_diagU in range(16*i+1,16*(i+1)):
                 l = 64 - n_diagU
                 delta = (l*2**4 + (((n_diagU%48)*2)%16)*2**11)%(2**15)
-                rot_i_1 = self.engine.rotate_left(u[i], delta, self.engine.rot_keys[delta])  
+                rot_i_1 = self.engine.rotate_left(u[i], delta)
                 
                 mask2 = self.masks['transpose']['mask2'][n_diagU]
                 mask3 = self.masks['transpose']['mask3'][n_diagU]
@@ -97,29 +96,29 @@ class ThorLinearEvaluator():
                 l_temp[(3-i)%4][0] = self.engine.add(l_temp[(3-i)%4][0], temp2)
                 l_temp[(3-i)%4][1] = self.engine.add(l_temp[(3-i)%4][1], temp3)
         
-        l = np.full((4,), None, dtype=DataStruct)
+        l = np.full((4,), None, dtype=object)
         for i in range(4):
             l[i] = self.engine.add(l_temp[i][0], self.engine.rotate_left(l_temp[i][1], -2**11))
         return l
     
-    def make_rotated_copies(self, cts: np.ndarray[DataStruct]):
+    def make_rotated_copies(self, cts: np.ndarray):
         """
         Input cts: [L0, L1, ..., L15], [L16, L17, ..., L31], ...(ct array of shape (n,))
         Ouptut cts: [L0, L1, ..., L15], [L1, L2, ..., L0], ...(ct array of shape (16*n,))
         """
-        rots = np.full((16*cts.shape[0],), None, dtype=DataStruct)
+        rots = np.full((16*cts.shape[0],), None, dtype=object)
         for i in range(cts.shape[0]):
             rots[16*i] = cts[i]
             for j in range(1, 16):
                 rots[16*i+j] = self.engine.rotate_left(rots[16*i+j-1], 2**11)
         return rots
     
-    def make_copies(self, cts: np.ndarray[DataStruct],scale=1/2):
+    def make_copies(self, cts: np.ndarray, scale=1/2):
         """
         Input cts: [L0, L1, ..., L15], [L16, L17, ..., L31], ...(ct array of shape (n,))
         Ouptut cts: scale * [L0, L0, ... L0], [L1, L1, ... L1], ...(ct array of shape (16*n,)), scale is 1/2 by default
         """
-        copies = np.full((16*cts.shape[0],), None, dtype=DataStruct)
+        copies = np.full((16*cts.shape[0],), None, dtype=object)
         scale = scale/2
         masks = self.masks['make_copies_2']
         
@@ -152,7 +151,7 @@ class ThorLinearEvaluator():
                 
         return copies #Level: l + 1
 
-    def rotate_internal(self, ct:DataStruct, delta:int=0, l_delta = 0, r_delta = 0, mask=None, mode=None) -> DataStruct:
+    def rotate_internal(self, ct: FheData, delta: int=0, l_delta=0, r_delta=0, mask=None, mode=None) -> FheData:
         """
         Rotates the ciphertext internally.
         @param mode: 'att' or 'block_diag_1' or 'block_diag_2'
@@ -160,7 +159,7 @@ class ThorLinearEvaluator():
         'block_diag_2' for feed forward layer
         """
         if delta == 0 and l_delta ==0:
-            return self.engine.level_up(ct, ct.level_calc+1)
+            return self.engine.level_down(ct, ct.level - 1)
         if mask is None:
             try:
                 mask = self.masks['rot_internal'][mode][delta]
@@ -176,12 +175,12 @@ class ThorLinearEvaluator():
             l_delta = delta
             r_delta = 6 - l_delta
         temp1 = self.engine.rescale(self.engine.pt_ct_mult(mask, ct)) #For right rotate level: l -> l+1
-        temp2 = self.engine.cc_sub(self.engine.level_up(ct, temp1.level_calc), temp1) #For left rotate level: l -> l+1
+        temp2 = self.engine.cc_sub(self.engine.level_down(ct, temp1.level), temp1) #For left rotate level: l -> l-1
         rrot_ct = self.engine.rotate_left(temp1, -r_delta)
         lrot_ct = self.engine.rotate_left(temp2, l_delta)
         return self.engine.add(lrot_ct, rrot_ct)
 
-    def rotsum(self, ct:DataStruct, interval:int) -> DataStruct:
+    def rotsum(self, ct: FheData, interval: int) -> FheData:
         """
         Rotate Sum Operation
         """
@@ -201,45 +200,45 @@ class ThorLinearEvaluator():
         self.masks['make_copies_2'] = {}
         self.masks['transpose'] = {'mask0':{}, 'mask1':{}, 'mask2':{}, 'mask3':{}}
         self.masks['ct_ct_matmul'] = {0:{}, 1:{}, 2:{}, 3:{}}
-        level = 15
+        level = min(14, self.engine.max_level)
         
         for i in range(1, 128):
             array = np.ones((2**15,), dtype=int)
             array[np.arange(self.engine.num_slots) % (2**11) >= (16*i)] = 0
-            self.masks['rot_internal']['att'][i] = self.engine.encode(array, level= level)
+            self.masks['rot_internal']['att'][i] = self.engine.encode_to_light_plaintext(array, level=level)
 
         for i in range(1, 16):
             array = np.ones((self.engine.num_slots,), dtype=int)
             array[np.arange(self.engine.num_slots) % (16) >= i] = 0
-            self.masks['rot_internal']['block_diag_1'][i] = self.engine.encode(array, level= level)
+            self.masks['rot_internal']['block_diag_1'][i] = self.engine.encode_to_light_plaintext(array, level=level)
         
         for i in range(1, 8):
             array = np.ones((self.engine.num_slots,), dtype=int)
             array[np.arange(self.engine.num_slots) % (8) >= i] = 0
-            self.masks['rot_internal']['block_diag_2'][i] = self.engine.encode(array, level= level)
+            self.masks['rot_internal']['block_diag_2'][i] = self.engine.encode_to_light_plaintext(array, level=level)
         
         for i in range(16):
             arr = np.zeros((2**15,), dtype=int)
             arr[2**11*i:2**11*(i+1)] = np.full((2**11,), 1)
-            self.masks['make_copies_merge'][i] = self.engine.encode(arr*(1/4), level=level)
+            self.masks['make_copies_merge'][i] = self.engine.encode_to_light_plaintext(arr*(1/4), level=level)
             
         for i in range(8):
             arr = np.zeros((2**15,), dtype=int)
             arr[2**12*i:2**12*(i+1)] = np.full((2**12,), 1)
-            self.masks['make_copies_2'][i] = self.engine.encode(arr*(1/4), level=level)
+            self.masks['make_copies_2'][i] = self.engine.encode_to_light_plaintext(arr*(1/4), level=level)
             
         for i in range(4):
             n_diag = 16*i
             arr0 = np.array([1]*16*(64+(n_diag-16)%64+16)) 
             arr1 = np.array([0]*(2**15-16*(64-((n_diag-16)%64+16)))+[1]*16*(64-((n_diag-16)%64+16))) 
-            self.masks['transpose']['mask0'][i] = self.engine.encode(arr0, level=level)
-            self.masks['transpose']['mask1'][i] = self.engine.encode(arr1, level=level)
+            self.masks['transpose']['mask0'][i] = self.engine.encode_to_light_plaintext(arr0, level=level)
+            self.masks['transpose']['mask1'][i] = self.engine.encode_to_light_plaintext(arr1, level=level)
             for j in range(16*i+1, 16*(i+1)):
                 l = 64-j
                 arr2 = np.array([0]*2**11*(16-j%16)+[1]*(128-l)*2**4) 
                 arr3 = np.array([0]*2**11*(16-j%16-1)+[0]*(128-l)*2**4+[1]*16*l) 
-                self.masks['transpose']['mask2'][j] = self.engine.encode(arr2, level=level)
-                self.masks['transpose']['mask3'][j] = self.engine.encode(arr3, level=level)
+                self.masks['transpose']['mask2'][j] = self.engine.encode_to_light_plaintext(arr2, level=level)
+                self.masks['transpose']['mask3'][j] = self.engine.encode_to_light_plaintext(arr3, level=level)
         
         for n in range(1, 128):
             masks = self.masks['ct_ct_matmul']
@@ -252,25 +251,24 @@ class ThorLinearEvaluator():
             arr1[np.arange(2**15) % (2**11) >= (2**11 - 16*rot)] = 1
             
             if j == 0:
-                masks[0][n] = self.engine.encode(arr0, level=level)
-                masks[1][n] = self.engine.encode(arr1, level=level)
+                masks[0][n] = self.engine.encode_to_light_plaintext(arr0, level=level)
+                masks[1][n] = self.engine.encode_to_light_plaintext(arr1, level=level)
             else:
             
                 arr0[:(2**11)*j] = np.zeros(((2**11)*j,), dtype=float)
-                masks[0][n] = self.engine.encode(arr0, level=level)
+                masks[0][n] = self.engine.encode_to_light_plaintext(arr0, level=level)
         
                 arr1[-(2**11):] = np.zeros(((2**11)), dtype=float)
                 if j > 1:
                     arr1[:(2**11)*(j-1)] = np.zeros(((2**11)*(j-1)), dtype=float)
-                masks[1][n] = self.engine.encode(arr1, level=level)
+                masks[1][n] = self.engine.encode_to_light_plaintext(arr1, level=level)
                 
                 arr2 = np.full((2**15,), 1, dtype=float)
                 arr2[np.arange(2**15) % (2**11) >= (2**11 - 16*rot)] = 0
                 arr2[(2**11)*j:] = np.zeros(((2**11)*(16-j)), dtype=float)
-                masks[2][n] = self.engine.encode(arr2, level=level)
+                masks[2][n] = self.engine.encode_to_light_plaintext(arr2, level=level)
                 
                 arr3 = np.full((2**15,), 1, dtype=float)
                 arr3 = arr3 - arr0 - arr1 - arr2
-                masks[3][n] = self.engine.encode(arr3, level=level)
+                masks[3][n] = self.engine.encode_to_light_plaintext(arr3, level=level)
                 
-

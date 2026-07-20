@@ -1,7 +1,6 @@
 import numpy as np
-from liberate.fhe.data_struct import DataStruct
 
-from ..ckks import CkksEngine
+from ..ckks import CkksEngine, FheData
 from .polynomial import evaluate_polynomial_stockmeyer
 
 def he_gelu(engine:CkksEngine, x:np.ndarray, sk=None, initial_btp=False):
@@ -10,7 +9,7 @@ def he_gelu(engine:CkksEngine, x:np.ndarray, sk=None, initial_btp=False):
     Output is gelu(x)/2 inorder to merge bootstrap at the next step
     """
     # print("gelu input level: ", x[0,0].level)
-    gelu_x = np.full_like(x, fill_value=None, dtype=DataStruct)
+    gelu_x = np.full_like(x, fill_value=None, dtype=object)
     for i in range(x.shape[0]):
         for j in range(x.shape[1]//2):
             x0 = x[i,j]
@@ -25,7 +24,7 @@ def he_gelu(engine:CkksEngine, x:np.ndarray, sk=None, initial_btp=False):
             gelu_x[i, j+x.shape[1]//2] = engine.auto_ct_ct_mult(x1_scaled, one_plus_tanhx1) #Level: 21
     return gelu_x
 
-def he_tanh_single(engine:CkksEngine, x:DataStruct):
+def he_tanh_single(engine: CkksEngine, x: FheData):
     """
     @param x: input ciphertext, scaled by 1/64
     """

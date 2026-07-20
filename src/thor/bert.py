@@ -1,5 +1,6 @@
 import numpy as np
-from liberate.fhe.data_struct import DataStruct
+from .ckks import FheData
+from desilofhe import LightPlaintext, Plaintext
 import torch
 from functools import partial
 import time
@@ -16,20 +17,23 @@ class ThorModule:
         self.devices = []
         
     def to(self, devices=[0]):
-        print(f"Memory allocated to GPU: {torch.cuda.memory_allocated(devices[0]) /1024**3} before layer allocation")
-
+        if not hasattr(self.engine, "to_cuda"):
+            return
         for key in self.keys:
             for index in np.ndindex(self.weights[key].shape):
-                if isinstance(self.weights[key][index], torch.Tensor):
-                    encoded = [self.weights[key][index].to(f"cuda:{devices[0]}")]
-                    self.weights[key][index] = encoded
+                value = self.weights[key][index]
+                if isinstance(value, (Plaintext, LightPlaintext)) and not value.is_cuda:
+                    self.engine.to_cuda(value)
         self.devices = devices
                     
     def cpu(self):
+        if not hasattr(self.engine, "to_cpu"):
+            return
         for key in self.keys:
             for index in np.ndindex(self.weights[key].shape):
-                if isinstance(self.weights[key][index], list):
-                    self.weights[key][index] = self.weights[key][index][0].cpu()          
+                value = self.weights[key][index]
+                if isinstance(value, (Plaintext, LightPlaintext)) and value.is_cuda:
+                    self.engine.to_cpu(value)
         self.devices = []
 
 class ThorBert:
@@ -48,14 +52,13 @@ class ThorBert:
         self.devices = []
              
     def to(self, devices=[]):
-        print(f"Memory allocated to GPU: {torch.cuda.memory_allocated(devices[0]) /1024**3:.2f} GB after pooler and classifier")
         self.devices = devices
     
     def forward(self, x: np.ndarray, attention_mask, devices=[], debug=False, sk = None):
         if debug:
             if sk is None:
                 raise ValueError("Please provide secret key")
-        if devices == []:
+        if devices == [] and self.engine.mode == "gpu":
             if self.devices == []:
                 raise ValueError("Please set GPU devices")
             devices = self.devices
@@ -68,7 +71,8 @@ class ThorBert:
             for j in range(i*self.max_layer_batch, (i+1)*self.max_layer_batch):
                 self.attentions[j].to(devices)
                 self.ffs[j].to(devices)
-                print(f"Memory allocated to GPU: {torch.cuda.memory_allocated(devices[0]) /1024**3:.2f} GB after layer {j} allocation: ")
+                if self.engine.mode == "gpu":
+                    print(f"Memory allocated to GPU: {torch.cuda.memory_allocated(devices[0]) /1024**3:.2f} GB after layer {j} allocation: ")
                 
             for j in range(i*self.max_layer_batch, (i+1)*self.max_layer_batch):
                 print(f"Forwarding layer: {j}")
@@ -80,7 +84,8 @@ class ThorBert:
             for j in range(i*self.max_layer_batch, (i+1)*self.max_layer_batch):
                 self.attentions[j].cpu()
                 self.ffs[j].cpu()
-                print(f"Memory allocated to GPU: {torch.cuda.memory_allocated(devices[0]) /1024**3:.2f} GB after layer {j} release: ")
+                if self.engine.mode == "gpu":
+                    print(f"Memory allocated to GPU: {torch.cuda.memory_allocated(devices[0]) /1024**3:.2f} GB after layer {j} release: ")
                 
         self.pooler.to(devices)
         self.classifier.to(devices)
@@ -90,7 +95,7 @@ class ThorBert:
         return x
             
 class ThorBertAttention(ThorModule):
-    def __init__(self, evaluator:ThorLinearEvaluator, weights: dict[np.ndarray[DataStruct]], layer_idx: int):
+    def __init__(self, evaluator:ThorLinearEvaluator, weights: dict[np.ndarray[FheData]], layer_idx: int):
         self.evaluator = evaluator
         self.engine = self.evaluator.engine
         self.layer_idx = layer_idx
@@ -127,10 +132,10 @@ class ThorBertAttention(ThorModule):
                 conj = self.engine.conjugate(x_cplx[i])
                 x[i] = self.engine.mult_scalar(self.engine.cc_add(x_cplx[i], conj), 1/2)
                 x[i+4] = self.engine.mult_scalar(self.engine.imult(self.engine.cc_sub(conj, x_cplx[i])), 1/2)
-                x_cplx[i] = self.engine.level_up(x_cplx[i], 21)
+                x_cplx[i] = self.engine.level_down(x_cplx[i], 8)
 
         
-        input_lev = x_cplx[0].level_calc
+        input_lev = x_cplx[0].level
         
         x_cplx_rots = self.evaluator.make_rotated_copies(x_cplx)
             
@@ -142,12 +147,12 @@ class ThorBertAttention(ThorModule):
         #Complexify l_k
         l_k_cplx = np.full((4,), None, dtype=object)
         for i in range(4):
-            l_k_cplx[i] = self.engine.cc_add(self.engine.level_up(l_k[i], l_k[i].level_calc+1), self.engine.imult(self.evaluator.rotate_internal(l_k[i], 64, mode='att')))
+            l_k_cplx[i] = self.engine.cc_add(self.engine.level_down(l_k[i], l_k[i].level - 1), self.engine.imult(self.evaluator.rotate_internal(l_k[i], 64, mode='att')))
             # Pre rescale
             l_k_cplx[i] = self.engine.rescale(l_k_cplx[i]) #Scale: delta
 
         for i in range(4):
-            q[i] = self.engine.level_up(q[i], q[i].level_calc+1)
+            q[i] = self.engine.level_down(q[i], q[i].level - 1)
             #Pre rescale
             q[i] = self.engine.rescale(q[i]) #Scale: delta
         q_copies = self.evaluator.make_copies(q)#, merge_copy=True)
@@ -165,12 +170,12 @@ class ThorBertAttention(ThorModule):
         for i in range(2):
             v_cplx[i] = self.engine.cc_add(v[i], self.engine.imult(v[i+2]))
 
-        if att_prob[0].level_calc < v_cplx[0].level_calc:
+        if att_prob[0].level > v_cplx[0].level:
             for j in range(128):
-                att_prob[j] = self.engine.level_up(att_prob[j], v[0].level_calc)
-        elif att_prob[0].level_calc > v_cplx[0].level_calc:
+                att_prob[j] = self.engine.level_down(att_prob[j], v_cplx[0].level)
+        elif att_prob[0].level < v_cplx[0].level:
             for j in range(2):
-                v_cplx[j] = self.engine.level_up(v_cplx[j], att_prob[0].level_calc)
+                v_cplx[j] = self.engine.level_down(v_cplx[j], att_prob[0].level)
 
         for i in range(2):
             # Pre rescale
@@ -195,7 +200,7 @@ class ThorBertAttention(ThorModule):
         x = self.layernorm(x=x_out_sum, debug=debug, sk=sk) #-> bs 1, level: 19
         return x
     
-    def query(self, x: np.ndarray[DataStruct]):
+    def query(self, x: np.ndarray[FheData]):
         """"
         Calculates the query layer of the self attention
         @param x: Complexified lower diagonals of the input, ciphertext array of shape (64,)
@@ -207,13 +212,13 @@ class ThorBertAttention(ThorModule):
         if wx.shape[0] != 4:
             raise ValueError("Shape of wx should be (4,)")
         
-        q = np.full((4,), None, dtype=DataStruct)
+        q = np.full((4,), None, dtype=object)
         for i in range(4):
             q[i] = self.engine.pc_add(self.weights['query.bias'][i], wx[i])
             q[i] = self.engine.cc_add(q[i], self.engine.conjugate(q[i]))
         return q
         
-    def key(self, x: np.ndarray[DataStruct]):
+    def key(self, x: np.ndarray[FheData]):
         """
         Calculates the key layer of the self attention
         @param x: Complexified lower diagonals of the input, ciphertext array of shape (64,)
@@ -229,7 +234,7 @@ class ThorBertAttention(ThorModule):
             wx[i] = self.engine.cc_add(wx[i], self.engine.conjugate(wx[i]))
         return wx
     
-    def value(self, x: np.ndarray[DataStruct]):
+    def value(self, x: np.ndarray[FheData]):
         """
         Calculates the value layer of the self attention
         @param x: Complexified lower diagonals of the input, ciphertext array of shape (64,)
@@ -245,7 +250,7 @@ class ThorBertAttention(ThorModule):
             wx[i] = self.engine.cc_add(wx[i], self.engine.conjugate(wx[i]))
         return wx
     
-    def calculate_attention_score(self, k_cplx: np.ndarray[DataStruct], q_copies: np.ndarray[DataStruct], scale=1, bootstrap=True, rescale=False, debug=False):
+    def calculate_attention_score(self, k_cplx: np.ndarray[FheData], q_copies: np.ndarray[FheData], scale=1, bootstrap=True, rescale=False, debug=False):
         """
         Calculates the attention score(qk^T)
         @param k_cplx: key, ciphertext array of shape (4,) [ [l0 +il64| l1 | ...l15+il79], ...[l48+il112| l49+il113|...l63+il127] ]
@@ -255,20 +260,20 @@ class ThorBertAttention(ThorModule):
         if k_cplx.shape != (4,) or q_copies.shape != (64,):
             raise ValueError("Shape of k_cplx should be (4,) and q_copies should be (64,)")
         
-        if k_cplx[0].level_calc != q_copies[0].level_calc:
-            if k_cplx[0].level_calc > q_copies[0].level_calc:
+        if k_cplx[0].level != q_copies[0].level:
+            if k_cplx[0].level < q_copies[0].level:
                 for i in range(len(q_copies)):
-                    q_copies[i]=self.engine.level_up(q_copies[i],k_cplx[0].level_calc)
+                    q_copies[i] = self.engine.level_down(q_copies[i], k_cplx[0].level)
             else:
                 for i in range(len(k_cplx)):
-                    k_cplx[i]=self.engine.level_up(k_cplx[i],q_copies[0].level_calc)
+                    k_cplx[i] = self.engine.level_down(k_cplx[i], q_copies[0].level)
             # raise ValueError("Levels of k_cplx and q_copies should be the same")
             
         n_in = 64
         n_out = 4
-        lev = k_cplx[0].level_calc #Level: l
+        lev = k_cplx[0].level #Level: l
         
-        ttemp = np.full((n_out,4), None, dtype=DataStruct)
+        ttemp = np.full((n_out,4), None, dtype=object)
         
         if bootstrap:
             scale = scale / 2
@@ -287,18 +292,18 @@ class ThorBertAttention(ThorModule):
             j = n % 16
             rot = n
             l_prime = q_copies[n]
-            temp = np.full((n_out,4), None, dtype=DataStruct)
+            temp = np.full((n_out,4), None, dtype=object)
             rrot = (2**11)*j - 16 * rot
             rrot = rrot%(2**15)
 
             if j == 0:
                 for out in range(n_out):
-                    rot_temp = self.engine.rotate_left(k_cplx[out], -rrot, self.engine.rot_keys[(self.engine.num_slots-rrot)])
+                    rot_temp = self.engine.rotate_left(k_cplx[out], -rrot)
                     temp_ct_ct = self.engine.ct_ct_mult(rot_temp, l_prime, rescale=rescale, relin=False)
 
                     for i in range(1):
                         temp[out, i] = self.engine.pt_ct_mult_extended(masks[i][n], temp_ct_ct)
-                    scaled_temp_ct_ct = self.engine.mult_int_scalar_triplet(temp_ct_ct, 2**41)
+                    scaled_temp_ct_ct = self.engine.level_down(temp_ct_ct, temp[out, 0].level)
                     temp[out, 1] = self.engine.sub(scaled_temp_ct_ct, temp[out,0])
                 
                 if q == 1:
@@ -342,12 +347,12 @@ class ThorBertAttention(ThorModule):
 
             else:  
                 for out in range(n_out):
-                    rot_temp = self.engine.rotate_left(k_cplx[out], -rrot, self.engine.rot_keys[self.engine.num_slots-rrot])
+                    rot_temp = self.engine.rotate_left(k_cplx[out], -rrot)
                     temp_ct_ct = self.engine.ct_ct_mult(rot_temp, l_prime, rescale=rescale, relin=False)
                     for i in range(3):
                         temp[out, i] = self.engine.pt_ct_mult_extended(masks[i][n], temp_ct_ct)
                     add_temp = self.engine.add(self.engine.add(temp[out,0], temp[out,1]), temp[out,2])
-                    scaled_temp_ct_ct = self.engine.mult_int_scalar_triplet(temp_ct_ct, 2**41)
+                    scaled_temp_ct_ct = self.engine.level_down(temp_ct_ct, temp[out, 0].level)
                     temp[out, 3] = self.engine.sub(scaled_temp_ct_ct, add_temp)
                 
                 if q == 0:
@@ -435,10 +440,10 @@ class ThorBertAttention(ThorModule):
                     ttemp[3,0] = self.engine.cc_add(ttemp[3,0], temp[0, 0])
                     ttemp[3,1] = self.engine.cc_add(ttemp[3,1], temp[0, 1])
         
-        output = np.full((8,), None, dtype=DataStruct)
-        ttemp_relin = np.full((n_out,4), None, dtype=DataStruct)
-        output_cplx = np.full((4,), None, dtype=DataStruct)
-        output_cplx_scaled = np.full((4,), None, dtype=DataStruct)
+        output = np.full((8,), None, dtype=object)
+        ttemp_relin = np.full((n_out,4), None, dtype=object)
+        output_cplx = np.full((4,), None, dtype=object)
+        output_cplx_scaled = np.full((4,), None, dtype=object)
 
         for out in range(n_out):
             for i in range(4):
@@ -455,19 +460,19 @@ class ThorBertAttention(ThorModule):
             output[out+n_out] = (self.engine.imult(self.engine.cc_sub(conj, output_cplx_scaled[out])))     
         return output
     
-    def calculate_attention_context(self, l_vt_cplx: np.ndarray[DataStruct], l_at_copies: np.ndarray[DataStruct], scale=1, complex=True, rescale=False):
+    def calculate_attention_context(self, l_vt_cplx: np.ndarray[FheData], l_at_copies: np.ndarray[FheData], scale=1, complex=True, rescale=False):
         """
         @param l_vt_cplx: value, ciphertext array of shape (2,)
         @param l_at_copies: attention prob, ciphertext array of shape (128,)
         """
-        lev = l_at_copies[0].level_calc
-        if l_vt_cplx[0].level_calc != lev:
+        lev = l_at_copies[0].level
+        if l_vt_cplx[0].level != lev:
             raise ValueError("Level of l_vt_cplx should be the same as l_at_copies")
         
         n_in = 128
         n_out = 2
 
-        ttemp = np.full((n_out,4), None, dtype=DataStruct)
+        ttemp = np.full((n_out,4), None, dtype=object)
         
         if not complex:
             scale = scale/2
@@ -487,7 +492,7 @@ class ThorBertAttention(ThorModule):
             rot = n
             l_prime = l_at_copies[n]
             
-            temp = np.full((n_out,4), None, dtype=DataStruct)
+            temp = np.full((n_out,4), None, dtype=object)
 
             rrot = (2**11)*j - 16 * rot
             rrot = rrot%(2**15)
@@ -499,7 +504,7 @@ class ThorBertAttention(ThorModule):
 
                     for i in range(1):
                         temp[out, i] = self.engine.pt_ct_mult_extended(masks[i][n], temp_ct_ct)
-                    scaled_temp_ct_ct = self.engine.mult_int_scalar_triplet(temp_ct_ct, 2**41)
+                    scaled_temp_ct_ct = self.engine.level_down(temp_ct_ct, temp[out, 0].level)
                     temp[out, 1] = self.engine.sub(scaled_temp_ct_ct, temp[out,0])
     
                 if q == 1:
@@ -539,7 +544,7 @@ class ThorBertAttention(ThorModule):
                     for i in range(3):
                         temp[out, i] = self.engine.pt_ct_mult_extended(masks[i][n], temp_ct_ct)
                     add_temp = self.engine.add(self.engine.add(temp[out,0], temp[out,1]), temp[out,2])
-                    scaled_temp_ct_ct = self.engine.mult_int_scalar_triplet(temp_ct_ct, 2**41)
+                    scaled_temp_ct_ct = self.engine.level_down(temp_ct_ct, temp[out, 0].level)
                     temp[out, 3] = self.engine.sub(scaled_temp_ct_ct, add_temp)
                 
                 if q == 0:
@@ -586,9 +591,9 @@ class ThorBertAttention(ThorModule):
                     ttemp[1,2] = self.engine.cc_add(ttemp[1,2], temp[0,0])
                     ttemp[1,3] = self.engine.cc_add(ttemp[1,3], temp[0,1])
        
-        output_cplx = np.full((2,), None, dtype=DataStruct)
-        output_cplx_scaled = np.full((2,), None, dtype=DataStruct)
-        ttemp_relin = np.full((n_out,4), None, dtype=DataStruct)
+        output_cplx = np.full((2,), None, dtype=object)
+        output_cplx_scaled = np.full((2,), None, dtype=object)
+        ttemp_relin = np.full((n_out,4), None, dtype=object)
         
         for out in range(n_out):
             for i in range(4):
@@ -601,13 +606,13 @@ class ThorBertAttention(ThorModule):
         return output_cplx_scaled
     
     
-    def dense(self, x: np.ndarray[DataStruct]):
+    def dense(self, x: np.ndarray[FheData]):
         """
         @param x: input, ciphertext array of shape (32,)
         @return: output, ciphertext array of shape (8,)
         """
 
-        lev = x[0].level_calc
+        lev = x[0].level
         wx = self.evaluator.pt_ct_matmul(self.weights['dense.weight'], x) #Level: l -> l + 2
         if wx.shape[0] != 8:
             raise ValueError("Shape of wx should be (8,)")
@@ -618,7 +623,7 @@ class ThorBertAttention(ThorModule):
         for i in range(8):
             temp = self.engine.rotate_left(self.engine.mc_mult(
                 mask1, wx[i]), 6) #Level: l + 3, scale: delta
-            wx[i] = self.engine.cc_add(self.engine.level_up(wx[i], lev+3), temp)
+            wx[i] = self.engine.cc_add(self.engine.level_down(wx[i], lev - 3), temp)
             wx[i] = self.engine.pc_add(self.weights['dense.bias'][i], wx[i])
             wx[i] = self.engine.cc_add(wx[i], self.engine.conjugate(wx[i]))
         return wx
@@ -652,7 +657,7 @@ class ThorBertFF(ThorModule):
         if x.shape != (8,):
             raise ValueError("Input of ff layer should be (8,)")
         
-        l = np.full((64,), None,dtype=DataStruct)
+        l = np.full((64,), None,dtype=object)
         mask = np.full((self.engine.num_slots,), 1, dtype=int)
         mask[np.arange(self.engine.num_slots) % (16) >= 6] = 0
         for i in range(4):
@@ -690,7 +695,7 @@ class ThorBertFF(ThorModule):
         ln2_out = self.layernorm(x=ln2_in, debug=debug, sk=sk) 
         if ln2_out[0].level > 8:
             for i in range(8):
-                ln2_out[i] = self.engine.level_up(ln2_out[i], 21)
+                ln2_out[i] = self.engine.level_down(ln2_out[i], 8)
         return ln2_out
         
     def dense1(self, x: np.ndarray): #Matmul + bias
@@ -703,7 +708,7 @@ class ThorBertFF(ThorModule):
         if x.shape != (64,):
             raise ValueError("Input of ff dense1 should be (64,)")
         
-        wx = np.full((2,8), None, dtype=DataStruct)
+        wx = np.full((2,8), None, dtype=object)
         wx[0] = self.evaluator.pt_ct_matmul(self.weights['dense1.weight'][0], x, mode='block_diag_2') #Level: l -> l + 2
         wx[1] = self.evaluator.pt_ct_matmul(self.weights['dense1.weight'][1], x, mode='block_diag_2')
         for i in range(2):
@@ -719,10 +724,10 @@ class ThorBertFF(ThorModule):
         """
         if x.shape != (2,8):
             raise ValueError("Ouptut of ff1 should be (2,8)")
-        l = np.full((2, 64), None, dtype=DataStruct)
-        wx = np.full((2, 8), None, dtype=DataStruct)
-        x_out = np.full((8,), None, dtype=DataStruct)
-        result = np.full((8,), None, dtype=DataStruct)
+        l = np.full((2, 64), None, dtype=object)
+        wx = np.full((2, 8), None, dtype=object)
+        x_out = np.full((8,), None, dtype=object)
+        result = np.full((8,), None, dtype=object)
         for n in range(2):
             for i in range(4):
                 l[n, 16*i] = self.engine.cc_add(x[n, i], self.engine.imult(x[n, i+4]))
@@ -761,7 +766,7 @@ class ThorBertPooler(ThorModule):
     def forward(self, x: np.ndarray):
         if x.shape != (8,):
             raise ValueError("Input of pooler should be (8,), Shape of x is ", x.shape)
-        x_cplx = np.full((4,), None, dtype=DataStruct)
+        x_cplx = np.full((4,), None, dtype=object)
         for i in range(4):
             x_cplx[i] = self.engine.cc_add(x[i], self.engine.imult(x[i+4]))
         x = self.dense(x_cplx) 
@@ -777,7 +782,7 @@ class ThorBertPooler(ThorModule):
         #Shape of self.weights['dense.weight'] is (2, 8, 6, 64)
         
         w = self.weights['dense.weight']
-        lev = x[0].level_calc
+        lev = x[0].level
         mask = np.zeros((self.engine.num_slots,), dtype=int)
         mask[np.arange(self.engine.num_slots) % (2**11) < 6] = scale
         
@@ -788,21 +793,21 @@ class ThorBertPooler(ThorModule):
                 ct_masked = self.engine.cc_add(ct_masked, ct_rot)
             x[index] = ct_masked
             
-        wx_l = np.full((6,), None, dtype=DataStruct)
+        wx_l = np.full((6,), None, dtype=object)
         for l in range(6):
             temp = self.engine.pt_ct_mult(w[l, 0], x[0])  #Level: l + 1, scale: delta^2
             for i in range(1,4):
                 temp = self.engine.cc_add(temp, self.engine.pt_ct_mult(w[l, i], x[i])) #Level: l + 1, scale: delta^2
             wx_l[l] = self.engine.rescale(temp) #Level: l + 2, scale: delta
             
-        temp2 = self.engine.level_up(wx_l[0], lev+3)
+        temp2 = self.engine.level_down(wx_l[0], lev - 3)
         for l in range(1, 6):
             rotated = self.evaluator.rotate_internal(wx_l[l], delta=6-l, mode='block_diag_2') #Level: l +2 -> l + 3
             temp2 = self.engine.cc_add(temp2, rotated)
             
         temp2 = self.evaluator.rotsum(temp2, 2**11)
 
-        wx = np.ndarray((1,), dtype=DataStruct)
+        wx = np.ndarray((1,), dtype=object)
         wx[0] = self.engine.pc_add(self.weights['dense.bias'][0], temp2)
         wx[0] = self.engine.cc_add(wx[0], self.engine.conjugate(wx[0]))
         return wx
@@ -833,7 +838,7 @@ class ThorBertClassifier(ThorModule):
         if x.shape != (1,):
             raise ValueError("Ouptut of pooler should be (1,)")
         n_cls = self.weights['dense.weight'].shape[0]
-        wx = np.full((n_cls,), None, dtype=DataStruct)
+        wx = np.full((n_cls,), None, dtype=object)
         for i in range(n_cls):
             wx[i] = self.engine.pt_ct_mult(self.weights['dense.weight'][i], x[0])
             temp = self.engine.cc_add(wx[i], self.engine.rotate_left(wx[i], 1))

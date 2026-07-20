@@ -3,7 +3,6 @@ import datasets
 import torch
 from torch.utils.data import DataLoader
 import numpy as np
-from liberate.fhe.data_struct import DataStruct
 
 from .ckks import CkksEngine
 from .utils.matrix import ld_entry
@@ -43,7 +42,7 @@ class ThorDataEncryptor:
             self.tokenized_dataset["validation"], batch_size=1, collate_fn=data_collator
         )       
         
-    def encrypt_embedding(self, embedding:np.ndarray, pk, level:int=0) -> np.ndarray[DataStruct]: 
+    def encrypt_embedding(self, embedding: np.ndarray, pk, level: int | None = None) -> np.ndarray:
         """
         Return an array of size (4,) which contains 4 ciphertexts. 
         """
@@ -66,7 +65,7 @@ class ThorDataEncryptor:
             ct[i] = self.engine.encode_and_encrypt(msg, pk, level)
         return ct
 
-    def encode_attention_mask(self, attention_mask:np.ndarray, level:int=15) -> np.ndarray[DataStruct]:
+    def encode_attention_mask(self, attention_mask: np.ndarray, level: int = 14) -> np.ndarray:
         """
         Return an array of size (8,) which contains 8 plaintexts. 
         """
@@ -84,10 +83,10 @@ class ThorDataEncryptor:
                     is_token = 1 if col_index < n_tokens else 0
                     for head in range(12):
                         msg[temp + t*16 + head] = is_token
-            attention_mask[i] = self.engine.encode(msg, level)
+            attention_mask[i] = self.engine.encode_to_light_plaintext(msg, level)
         return attention_mask
     
-    def encrypt_attention_mask(self, attention_mask:np.ndarray, level:int=0) -> np.ndarray[DataStruct]:  
+    def encrypt_attention_mask(self, attention_mask: np.ndarray, level: int | None = None) -> np.ndarray:
         """
         Return an array of size (8,) which contains 8 ciphertexts. 
         """
@@ -105,7 +104,7 @@ class ThorDataEncryptor:
                     is_token = 1 if col_index < n_tokens else 0
                     for head in range(12):
                         msg[temp + t*16 + head] = is_token
-            attention_mask[i] = self.engine.encodecrypt(msg, level)
+            attention_mask[i] = self.engine.encode_and_encrypt(msg, level=level)
         return attention_mask    
                 
     def embed_all_data(self) -> list[np.ndarray]:

@@ -1,7 +1,6 @@
 import numpy as np
 import torch
 from safetensors.torch import load_file as load_safetensors
-from liberate.fhe.data_struct import DataStruct
 
 from .ckks import CkksEngine
 from .utils.matrix import ud_entry, to_blocks
@@ -29,6 +28,9 @@ class ThorModelEncoder:
             self.encode_ff(layer)
             self.encode_pooler()
             self.encode_cls()
+
+    def save(self, filename: str) -> None:
+        self.ckks_engine.save_plaintext_weights(self.weights_pt, filename)
             
     def encode_att(self, layer:int):
         for qkv in ['query', 'key', 'value']:
@@ -37,30 +39,30 @@ class ThorModelEncoder:
             else: 
                 sftmx_scale = 1
             self.weights_pt[f'bert.encoder.layer.{layer}.attention.self.{qkv}.weight'] = self._encode_w_qkv(
-                self.weights_m[f'bert.encoder.layer.{layer}.attention.self.{qkv}.weight'].cpu().numpy(),level=21, scale=sftmx_scale
+                self.weights_m[f'bert.encoder.layer.{layer}.attention.self.{qkv}.weight'].cpu().numpy(), level=8, scale=sftmx_scale
                 )
             self.weights_pt[f'bert.encoder.layer.{layer}.attention.self.{qkv}.bias'] = self._encode_b(
-                self.weights_m[f'bert.encoder.layer.{layer}.attention.self.{qkv}.bias'].cpu().numpy(),level=22,
+                self.weights_m[f'bert.encoder.layer.{layer}.attention.self.{qkv}.bias'].cpu().numpy(), level=7,
                 n_blocks = self.n_heads, n_out = 64, scale=sftmx_scale
                 )
         
         #Change level later
         self.weights_pt[f'bert.encoder.layer.{layer}.attention.output.dense.weight'] = self._encode_w_att(
-            self.weights_m[f'bert.encoder.layer.{layer}.attention.output.dense.weight'].cpu().numpy(), level=18,
+            self.weights_m[f'bert.encoder.layer.{layer}.attention.output.dense.weight'].cpu().numpy(), level=11,
             n_in = 64, n_out = 128, b_shape=(128, 64)
             )
         self.weights_pt[f'bert.encoder.layer.{layer}.attention.output.dense.bias'] = self._encode_b(
-            self.weights_m[f'bert.encoder.layer.{layer}.attention.output.dense.bias'].cpu().numpy(), level=20,
+            self.weights_m[f'bert.encoder.layer.{layer}.attention.output.dense.bias'].cpu().numpy(), level=9,
             n_blocks = 6, n_out = 128
             )
         self.weights_pt[f'bert.encoder.layer.{layer}.attention.output.LayerNorm.weight'] = self._encode_b(
             self.weights_m[f'bert.encoder.layer.{layer}.attention.output.LayerNorm.weight'].cpu().numpy(), 
-            n_blocks = 6, n_out = 128, level=15
+            n_blocks = 6, n_out = 128, level=14
             )
         #This level should be changed
         self.weights_pt[f'bert.encoder.layer.{layer}.attention.output.LayerNorm.bias'] = self._encode_b(
             self.weights_m[f'bert.encoder.layer.{layer}.attention.output.LayerNorm.bias'].cpu().numpy(), 
-            n_blocks = 6, n_out = 128, level=15
+            n_blocks = 6, n_out = 128, level=14
             )
     
     def encode_ff(self, layer:int):
@@ -72,16 +74,16 @@ class ThorModelEncoder:
                     raise ValueError("Shape of FF1 W should be (3072, 768)")
 
                 self.weights_pt[f'bert.encoder.layer.{layer}.{ff_type}.dense.weight'] = self._encode_w_ff(
-                    weight, n_in = 128, n_out= 128, b_shape=(128, 128),vsplit=4, scale=gelu_scale, level=16
+                    weight, n_in = 128, n_out= 128, b_shape=(128, 128),vsplit=4, scale=gelu_scale, level=13
                     )
     
-                self.weights_pt[f'bert.encoder.layer.{layer}.{ff_type}.dense.bias'] = np.full((2,8), None, dtype=DataStruct)
+                self.weights_pt[f'bert.encoder.layer.{layer}.{ff_type}.dense.bias'] = np.full((2,8), None, dtype=object)
                 
                 bias_m = np.split(self.weights_m[f'bert.encoder.layer.{layer}.{ff_type}.dense.bias'].cpu().numpy(), 2)
                 
                 for i in range(2):
                     self.weights_pt[f'bert.encoder.layer.{layer}.{ff_type}.dense.bias'][i] = self._encode_b(
-                    bias_m[i], n_blocks = 12, n_out = 128, pad_index=self.pad_index['ff'], scale=gelu_scale, level=18
+                    bias_m[i], n_blocks = 12, n_out = 128, pad_index=self.pad_index['ff'], scale=gelu_scale, level=11
                     )
             else:
                 weight = self.weights_m[f'bert.encoder.layer.{layer}.{ff_type}.dense.weight'].cpu().numpy()
@@ -89,25 +91,25 @@ class ThorModelEncoder:
                     raise ValueError("Shape of FF2 W should be (768, 3072)")
                 
                 self.weights_pt[f'bert.encoder.layer.{layer}.{ff_type}.dense.weight'] = self._encode_w_ff(
-                    weight, n_in = 128, n_out= 128, b_shape=(128, 128), hsplit=4, level=18
+                    weight, n_in = 128, n_out= 128, b_shape=(128, 128), hsplit=4, level=11
                     )
                 
                 self.weights_pt[f'bert.encoder.layer.{layer}.{ff_type}.dense.bias'] = self._encode_b(
                 self.weights_m[f'bert.encoder.layer.{layer}.{ff_type}.dense.bias'].cpu().numpy(), 
-                n_blocks = 6, n_out = 128, n_slot=16, level=20
+                n_blocks = 6, n_out = 128, n_slot=16, level=9
                 )
                 
         self.weights_pt[f'bert.encoder.layer.{layer}.output.LayerNorm.weight'] = self._encode_b(
         self.weights_m[f'bert.encoder.layer.{layer}.output.LayerNorm.weight'].cpu().numpy(),
-        n_blocks = 6, n_out = 128, n_slot=16, level=15
+        n_blocks = 6, n_out = 128, n_slot=16, level=14
         )
         
         self.weights_pt[f'bert.encoder.layer.{layer}.output.LayerNorm.bias'] = self._encode_b(
             self.weights_m[f'bert.encoder.layer.{layer}.output.LayerNorm.bias'].cpu().numpy(),
-        n_blocks = 6, n_out = 128, n_slot=16, level=15
+        n_blocks = 6, n_out = 128, n_slot=16, level=14
         )
                 
-    def encode_pooler(self, level:int=15):
+    def encode_pooler(self, level: int = 14):
         self.weights_pt['bert.pooler.dense.weight'] = self._encode_w_pooler(
             self.weights_m['bert.pooler.dense.weight'].cpu().numpy()
             )
@@ -115,7 +117,7 @@ class ThorModelEncoder:
             self.weights_m['bert.pooler.dense.bias'].cpu().numpy(), n_blocks = 6
             )
         
-    def encode_cls(self, level:int=15):
+    def encode_cls(self, level: int = 14):
         
         cls_name = "cls.seq_relationship" if 'cls.seq_relationship.weight' in self.weights_m.keys() else "classifier"
         w = self.weights_m[f'{cls_name}.weight'].cpu().numpy()
@@ -129,7 +131,7 @@ class ThorModelEncoder:
             b
             )
         
-    def _encode_w_qkv(self, w:np.ndarray, level:int=15, scale=1/256) -> np.ndarray:
+    def _encode_w_qkv(self, w: np.ndarray, level: int = 14, scale=1/256) -> np.ndarray:
         """
         Return an array of shape (4, 6, 64) which contains 4 * 6 * 64 = 1536 plaintexts
         """
@@ -138,7 +140,7 @@ class ThorModelEncoder:
         w_pt = self._encode_w_att(w, n_in = 128, n_out= 64, b_shape=(64, 128), level=level, scale=scale)
         return w_pt
     
-    def _encode_w_att(self, w:np.ndarray, n_in:int, n_out:int, b_shape:tuple[int], level:int=15, scale:float=1) -> np.ndarray:
+    def _encode_w_att(self, w: np.ndarray, n_in: int, n_out: int, b_shape: tuple[int], level: int = 14, scale: float = 1) -> np.ndarray:
         """
         Returns plaintext array of shape (n_out/pack, ll, n_in/2), ll = min(w.shape[0]/b_shape[0], w.shape[1]/b_shape[1])
         """
@@ -153,7 +155,7 @@ class ThorModelEncoder:
         n_in_c = n_in //2 #Complexification
         ld_blocks, (ll,dd) = to_blocks(w, b_shape, diag=True) 
         n_out_p = n_out // pack
-        pts = np.full((n_out_p, ll, n_in_c), None, dtype=DataStruct)
+        pts = np.full((n_out_p, ll, n_in_c), None, dtype=object)
 
         for l in range(ll):
             diagonal = ld_blocks[l]
@@ -169,14 +171,11 @@ class ThorModelEncoder:
                             for d in range(12): 
                                 block = diagonal[d]
                                 msg[temp + t*16 + d] = complex( (scale*ud_entry(block, i, t, r))/2, - (scale*ud_entry(block, (i+n_in_c)%n_in, t, r))/2)
-                    pt = self.ckks_engine.encode(msg, level)
-                    pt = pt[0].cpu()
-                    torch.cuda.empty_cache()
-                    pts[out, l, n] = pt
+                    pts[out, l, n] = self.ckks_engine.encode_to_light_plaintext(msg, level)
         return pts
         
     def _encode_w_ff(self, w:np.ndarray, n_in:int, n_out:int, b_shape:tuple[int], 
-                         level:int=15, vsplit =0, hsplit=0, scale=1) -> np.ndarray:
+                         level: int = 14, vsplit=0, hsplit=0, scale=1) -> np.ndarray:
         """
         Returns plaintext array of shape (2, n_out/pack, ll, n_in/2), ll = min(w.shape[0]/b_shape[0], w.shape[1]/b_shape[1])
         """
@@ -219,14 +218,10 @@ class ThorModelEncoder:
                                     block2 = ld_blocks_list[rep * 2 + 1][l, d]
                                     msg[temp + t*16 + d] = complex((scale*ud_entry(block1, i, t, r)/2), -((scale*ud_entry(block1, (i+n_in_c)%n_in, t, r))/2))
                                     msg[temp + t*16 + d+8] = complex((scale*ud_entry(block2, i, t, r)/2), -((scale*ud_entry(block2, (i+n_in_c)%n_in, t, r))/2))
-                        pt = self.ckks_engine.encode(msg, level)
-                        pt = pt[0].cpu()
-                        with torch.cuda.device(1):
-                            torch.cuda.empty_cache()
-                        pts[rep, out, l, n]= pt
+                        pts[rep, out, l, n] = self.ckks_engine.encode_to_light_plaintext(msg, level)
         return pts
     
-    def _encode_w_pooler(self, w:np.ndarray, b_shape:tuple[int]=(128,128), level:int=15) -> np.ndarray:
+    def _encode_w_pooler(self, w: np.ndarray, b_shape: tuple[int]=(128,128), level: int = 14) -> np.ndarray:
         """
         Returns plaintext array of shape (ll, 4), ll = min(w.shape[0]/b_shape[0], w.shape[1]/b_shape[1])
         """
@@ -236,7 +231,7 @@ class ThorModelEncoder:
             raise ValueError("Dimension does not match")
 
         ld_blocks, (ll,dd) = to_blocks(w, b_shape, diag=True) #ll = 6, dd = 6
-        pts = np.full((ll, 4), None, dtype=DataStruct)
+        pts = np.full((ll, 4), None, dtype=object)
         for l in range(ll):
             blocks = ld_blocks[l]
             for n in range(4): 
@@ -248,20 +243,17 @@ class ThorModelEncoder:
                         for d in range(6): 
                             block = blocks[d]
                             msg[temp + m * 16 + d] = complex(block[m, i]/2, -block[m, i+64]/2)
-                pt = self.ckks_engine.encode(msg, level)
-                pt = pt[0].cpu()
-                torch.cuda.empty_cache()
-                pts[l, n] = pt
+                pts[l, n] = self.ckks_engine.encode_to_light_plaintext(msg, level)
         return pts
             
-    def _encode_w_cls(self, w:np.ndarray, level:int=15) -> np.ndarray:
+    def _encode_w_cls(self, w: np.ndarray, level: int = 14) -> np.ndarray:
         """
         @w: numpy array of shape (cls, 768)
         """
         if w.shape[1] != 768:
             raise ValueError(f"Shape of W_cls should be (cls, 768). Shape of W_cls is {w.shape}")
         n_cls = w.shape[0]
-        pts = np.full((n_cls,), None, dtype=DataStruct)
+        pts = np.full((n_cls,), None, dtype=object)
         for n in range(n_cls):
             blocks = np.split(w[n], 6)
             msg = np.zeros((2**15,), dtype=float)
@@ -269,26 +261,21 @@ class ThorModelEncoder:
                 for d in range(6):
                     block = blocks[d]
                     msg[t* 16 + d] = block[t]
-            pt = self.ckks_engine.encode(msg, level)
-            pt = pt[0].cpu()
-            torch.cuda.empty_cache()
-            pts[n] = pt
+            pts[n] = self.ckks_engine.encode_to_light_plaintext(msg, level)
         return pts
     
-    def _encode_b_cls(self, b:np.ndarray, level:int=15) -> np.ndarray:
+    def _encode_b_cls(self, b: np.ndarray, level: int = 14) -> np.ndarray:
         n_cls = b.shape[0]
         msg = np.zeros((2**15,), dtype=float)
-        pts = np.full((n_cls,), None, dtype=DataStruct)
+        pts = np.full((n_cls,), None, dtype=object)
         for n in range(n_cls):
             msg = np.zeros((2**15,), dtype=float)
             msg[0] = b[n]
-            pt = self.ckks_engine.encode(msg, level)
-            pt = pt[0].cpu()
-            pts[n] = pt
+            pts[n] = self.ckks_engine.encode_to_light_plaintext(msg, level)
         return pts
     
     def _encode_b(self, b:np.ndarray, n_blocks:int, n_out:int, 
-                  level:int =15,pack:int=16, n_slot = 16, pad_index=None, scale=1) -> np.ndarray:
+                  level: int = 14, pack: int = 16, n_slot=16, pad_index=None, scale=1) -> np.ndarray:
         """
         Returns an array of shape (n_out/pack, ) which contains n_out/pack plaintexts
         """
@@ -319,14 +306,11 @@ class ThorModelEncoder:
                             block = blocks[c]
                             msg[temp + t*n_slot + d] = (scale * block[(r+t) % block.shape[0]])/2
                             c += 1
-            pt = self.ckks_engine.encode(msg, level)
-            pt = pt[0].cpu()
-            torch.cuda.empty_cache()
-            pts[out] = pt
+            pts[out] = self.ckks_engine.encode_to_light_plaintext(msg, level)
         return pts
         
     def _encode_b_pooler(self, b:np.ndarray, n_blocks:int, 
-                  level:int =15,n_slot = 16, pad_index=None) -> np.ndarray:
+                  level: int = 14, n_slot=16, pad_index=None) -> np.ndarray:
         """
         Returns an array of shape (n_out/pack, ) which contains n_out/pack plaintexts
         """
@@ -353,8 +337,5 @@ class ThorModelEncoder:
                     msg[t*n_slot + d] = block[t]/2
                     c += 1
         msg = np.tile(msg, 2**4)
-        pt = self.ckks_engine.encode(msg, level)
-        pt = pt[0].cpu()
-        torch.cuda.empty_cache()
-        pts[0] = pt
+        pts[0] = self.ckks_engine.encode_to_light_plaintext(msg, level)
         return pts

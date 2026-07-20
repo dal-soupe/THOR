@@ -1,7 +1,6 @@
 import numpy as np
-from liberate.fhe.data_struct import DataStruct
 
-from ..ckks import CkksEngine
+from ..ckks import CkksEngine, FheData
 from .polynomial import evaluate_polynomial_stockmeyer
 
 def he_softmax1(engine:CkksEngine, x, attention_mask, rescale=False, debug=False, sk=None):
@@ -37,7 +36,7 @@ def he_softmax(engine:CkksEngine, u, attention_mask, rescale, min_x, max_x, n, l
     internal_alpha=0.1
     if l>1:
         masking = np.array(([1]*12+[0.0]*4)*2**11)
-        enc_one = engine.encode_and_encrypt(masking, level=engine.num_levels-sigma_exp.level)
+        enc_one = engine.encode_and_encrypt(masking, level=sigma_exp.level)
         inv_D,D_delta,output_precision = he_inv(engine, enc_one, sigma_exp, epsilon=inv_epsilon, alpha=internal_alpha/10)          
         
         # 0 iteration in the for loop
@@ -46,7 +45,7 @@ def he_softmax(engine:CkksEngine, u, attention_mask, rescale, min_x, max_x, n, l
         exp_u, inv_D, D_delta, output_precision = update_inv_D(engine, exp_u, attention_mask, inv_D, D_delta, output_precision, alpha=output_alpha, final_inv=True)
     elif l==1:
         masking = np.array(([1]*12+[0.01]*4)*2**7)
-        enc_one = engine.encode_and_encrypt(masking, level=engine.num_levels-sigma_exp.level)
+        enc_one = engine.encode_and_encrypt(masking, level=sigma_exp.level)
         inv_D,D_delta,output_precision = he_inv(engine, enc_one, sigma_exp,epsilon=inv_epsilon,alpha=output_alpha)
 
     cplx_softmax1=[]
@@ -60,7 +59,7 @@ def he_softmax(engine:CkksEngine, u, attention_mask, rescale, min_x, max_x, n, l
         exp_cplx = engine.mult_int_scalar(exp_cplx, int(1/(2*D_delta))+1)        
         if exp_cplx.level < 4:
             exp_cplx = engine.bootstrap(exp_cplx)
-            exp_cplx = engine.level_up(exp_cplx, 16)
+            exp_cplx = engine.level_down(exp_cplx, 13)
         for j in range(16):
             masked_softmax= engine.auto_ct_ct_mult(exp_cplx, rotated_inv_D[j])
             if rescale:
@@ -112,21 +111,21 @@ def update_inv_D(engine, exp_u, attention_mask, inv_D, D_delta, output_precision
     
     # Inverse calculation
     epsilon2 = output_precision / 128 / 2
-    enc_one = engine.encode_and_encrypt(masking, level=engine.num_levels - summation.level)
+    enc_one = engine.encode_and_encrypt(masking, level=summation.level)
     inv_D, D_delta, output_precision = he_inv(engine, enc_one, summation, epsilon=epsilon2, alpha=alpha / 10)
     if final_inv:
         masking = np.array(([1] * 12 + [0] * 4) * (2**7))
     inv_D = engine.cm_mult(inv_D, masking)
     return exp_2u, inv_D, D_delta, output_precision
 
-def he_inv(engine:CkksEngine, numerator:DataStruct, denominator:DataStruct, epsilon:float, alpha:float, delta=1):
+def he_inv(engine: CkksEngine, numerator: FheData, denominator: FheData, epsilon: float, alpha: float, delta=1):
     d = 0
     an = Ciphertext(numerator, delta)
     bn = Ciphertext(denominator, delta)
     en = epsilon 
     while en<1-alpha:
         
-        if an.ciphertext.level_calc > engine.num_levels - 3:
+        if an.ciphertext.level < 3:
             scale_adjust=int(1/(bn.delta*4)/2)
             
             if scale_adjust>1:
@@ -231,6 +230,6 @@ def he_exp2(engine:CkksEngine, enc_x, min_x, max_x, n):
     return exp_x
 
 class Ciphertext:
-    def __init__(self, ciphertext:DataStruct, delta:float):
+    def __init__(self, ciphertext: FheData, delta: float):
         self.ciphertext = ciphertext
         self.delta = delta

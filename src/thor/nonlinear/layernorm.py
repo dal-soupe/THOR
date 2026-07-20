@@ -47,8 +47,8 @@ def he_layernorm(engine:CkksEngine, l,gamma,beta, var_e,min_var, max_var,n=768, 
     
     #Compute numerator n*x - sigma(x)
     nx = [engine.mult_int_scalar(ct, n) for ct in enc_l]
-    if nx[0].level_calc > sum_x.level_calc:
-        sum_x =engine.level_up(sum_x, nx[0].level_calc)
+    if nx[0].level < sum_x.level:
+        sum_x = engine.level_down(sum_x, nx[0].level)
     numerator = [engine.sub(ct, sum_x) for ct in nx]
     
     #Compute sigma(x**2)
@@ -67,17 +67,17 @@ def he_layernorm(engine:CkksEngine, l,gamma,beta, var_e,min_var, max_var,n=768, 
     variance = engine.add_scalar(variance, var_e/max_for_denominator)
     
     #Encrypt one
-    enc_one = engine.encode_and_encrypt(mask, level=variance.level_calc)
+    enc_one = engine.encode_and_encrypt(mask, level=variance.level)
     
     #Compute Inverse Square Root
     #Rotations to spread the Inverse Square Root Across Slots
     
     denominator = he_invsqrt(engine, enc_one,variance,epsilon_var1,alpha=0.001,mask=mask)
     if name == 'ln1':
-        if denominator.level_calc > 29- 7:
+        if denominator.level < 7:
             denominator = engine.bootstrap(denominator)
     else:
-        if denominator.level_calc > 29-10:
+        if denominator.level < 10:
             denominator = engine.bootstrap(denominator)
     denominator = engine.add(denominator,engine.rotate_left(denominator,-1))
     denominator = engine.add(denominator,engine.rotate_left(denominator,-2))
@@ -110,7 +110,7 @@ def he_invsqrt(engine:CkksEngine, numerator, denominator,e,alpha, mask=np.array(
         d=d+1
         kn=np.roots([1-en**3,6*en**2-6,9-9*en])[1] # find kn s.t. f(kn*en)=f(kn*1)
         bn1=engine.cm_mult(bn, (kn**(3/2)/2)*mask)
-        if an.level_calc>(29-4) or bn.level_calc>(29-4):
+        if an.level < 4 or bn.level < 4:
             an = engine.mult_int_scalar(an,2**6)
             an = engine.bootstrap(an)
             an = engine.mult_scalar(an, 1/2**6)

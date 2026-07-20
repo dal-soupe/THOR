@@ -1,5 +1,4 @@
 import numpy as np
-from liberate.fhe.data_struct import DataStruct
 
 from ..ckks import CkksEngine
 from .polynomial import evaluate_polynomial_stockmeyer
@@ -9,7 +8,7 @@ def he_tanh(engine:CkksEngine, x, min_x=-40, max_x=40, scale=40):
     """
     @params: x is scaled by 1/40, level:19
     """
-    tanh_x = np.full_like(x, fill_value=None, dtype=DataStruct)
+    tanh_x = np.full_like(x, fill_value=None, dtype=object)
     for i in range(x.shape[0]):
         tanh_x[i] = he_tanh_single(engine, x[i], min_x, max_x, scale)
     return tanh_x
@@ -36,4 +35,3 @@ def he_tanh_single(engine:CkksEngine, normed_x, min_x=-40, max_x=40, scale=40):
     tanh_x = evaluate_polynomial_stockmeyer(engine, p2, tanh_x)
     tanh_x = engine.bootstrap(tanh_x)
     return tanh_x
-

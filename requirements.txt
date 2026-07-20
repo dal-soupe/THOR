@@ -83,8 +83,7 @@ jupyterlab_server==2.27.3
 jupyterlab_widgets==3.0.11
 keyring==24.3.1
 kiwisolver==1.4.5
-liberate==0.1.9
-liberate-fhe @ file:///home/dongwoo3/liberate-dev-HY-univ/dist/liberate_fhe-0.9.3-py3-none-any.whl#sha256=3c83419043dc4babfff9e8f793f3622fef5b2c6e247a632ce39ece6e97cbf6dc
+desilofhe==1.15.1
 MarkupSafe==2.1.5
 matplotlib==3.8.4
 matplotlib-inline==0.1.7
