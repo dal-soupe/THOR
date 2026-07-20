@@ -1,4 +1,6 @@
 .venv/
 __pycache__/
+src/thor/__pycache__/*
 *.py[cod]
 .pytest_cache/
+*.pyc
