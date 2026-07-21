@@ -10,6 +10,7 @@ from thor import ThorModelEncoder, CkksEngine
 engine = CkksEngine(
     mode=os.environ.get("THOR_FHE_MODE", "cpu"),
     use_bootstrap_to_17_levels=True,
+    compact=True,
 )
 
 #Encode model

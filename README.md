@@ -41,8 +41,12 @@ Create the engine with the matching mode:
 ```python
 from thor import CkksEngine
 
-cpu_engine = CkksEngine(mode="cpu", use_bootstrap_to_17_levels=True)
-gpu_engine = CkksEngine(mode="gpu", use_bootstrap_to_17_levels=True)
+cpu_engine = CkksEngine(
+    mode="cpu", use_bootstrap_to_17_levels=True, compact=True
+)
+gpu_engine = CkksEngine(
+    mode="gpu", use_bootstrap_to_17_levels=True, compact=True
+)
 ```
 
 `encode.py` uses CPU mode by default. Set `THOR_FHE_MODE=gpu` when the CUDA
@@ -55,6 +59,8 @@ THOR_FHE_MODE=gpu python encode.py
 ## Running inference
 
 Run `forward.ipynb`. Its key setup uses DesiloFHE's typed key serialization and
-creates keys under `keys/desilofhe/` when they do not exist. Bootstrap-key
-generation is expensive and the resulting key is large, so retain that
-directory between runs.
+creates compact keys under `keys/desilofhe-small-compact-v1/` when they do not
+exist. Keys are generated with a CPU engine to avoid GPU allocation spikes,
+then loaded into the GPU engine. THOR uses the small bootstrap key, which needs
+less device memory but bootstraps more slowly than the regular key. Retain the
+key directory between runs.
