@@ -3,6 +3,20 @@
 THOR runs BERT inference with CKKS homomorphic encryption using
 [DesiloFHE](https://fhe.desilo.dev/latest/).
 
+## Conda environment
+
+Create from the environment file:
+
+```bash
+conda env create -f thor-env.yaml
+```
+
+Export in an environment file:
+
+```bash
+conda export > environment.yaml
+```
+
 ## Data files
 
 The following directories are not stored in Git because of their size:
@@ -17,6 +31,14 @@ Download them from the
 and place the directories in the repository root. Existing Liberate keys and
 encoded plaintexts are not compatible with DesiloFHE. Regenerate keys with the
 key cell in `forward.ipynb` and regenerate encoded models with `encode.py`.
+
+Download with `gdown`:
+
+```bash
+gdown "https://drive.google.com/uc?id=<fileID>" -O ./
+gdown "https://drive.google.com/uc?id=<fileID>" --continue
+gdown https://drive.google.com/drive/folders/1mWBkNdsu3JCQPrSuedyeN_3WJD7h-6RO -O ./ --folder
+```
 
 ## Installation
 
