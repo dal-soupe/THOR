@@ -37,9 +37,15 @@ class ThorDataEncryptor:
         self.embedding_model = embedding_model
         self.engine = ckks_engine 
         self.tokenized_dataset = self.tokenize()
-        data_collator = DataCollatorWithPadding(tokenizer=self.tokenizer)
+        #data_collator = DataCollatorWithPadding(tokenizer=self.tokenizer)
+        data_collator = DataCollatorWithPadding(
+            tokenizer=self.tokenizer,
+            return_tensors="pt"
+        )
         self.eval_dataloader = DataLoader(
-            self.tokenized_dataset["validation"], batch_size=1, collate_fn=data_collator
+            self.tokenized_dataset["validation"],
+            batch_size=1,
+            collate_fn=data_collator
         )       
         
     def encrypt_embedding(self, embedding: np.ndarray, pk, level: int | None = None) -> np.ndarray:
@@ -139,7 +145,7 @@ class ThorDataEncryptor:
             tokenized_dataset = tokenized_dataset.remove_columns(['sentence1', 'sentence2', 'idx']).rename_column('label', 'labels')
         elif self.dataset_type == 'sst2':
             tokenized_dataset = tokenized_dataset.remove_columns(['sentence', 'idx']).rename_column('label', 'labels')
-        tokenized_dataset.set_format(type='torch')
+        #tokenized_dataset.set_format(type='torch')
         return tokenized_dataset
     
     def _tokenize(self, data):

@@ -45,6 +45,14 @@ conda.tmp/
 test-report.xml
 .env
 
+cache*
+*.tar
+datasets/
+encoded_models*/
+finetuned_models/
+keys/
+resources/
+
 # default pytest duration files
 .test_durations
 

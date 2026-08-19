@@ -8,7 +8,7 @@ from thor import ThorModelEncoder, CkksEngine
 
 # Use THOR_FHE_MODE=gpu with the desilofhe-cu121 distribution on a CUDA host.
 engine = CkksEngine(
-    mode=os.environ.get("THOR_FHE_MODE", "cpu"),
+    mode=os.environ.get("THOR_FHE_MODE", "gpu"),
     use_bootstrap_to_17_levels=True,
 )
 
