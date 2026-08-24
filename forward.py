@@ -171,20 +171,8 @@ for batch in data_loader:
         embedding = data_encryptor.embed_data(data)
         x = data_encryptor.encrypt_embedding(embedding, pk, level=9)
         attention_mask = batch['attention_mask']
-        thor_attention_mask = data_encryptor.encode_attention_mask(attention_mask.cpu().numpy().squeeze().T, level=14)
+        thor_attention_mask = data_encryptor.encode_attention_mask(attention_mask.cpu().numpy().squeeze().T, level=13)
         break
-
-print(
-    "CUDA allocated:",
-    torch.cuda.memory_allocated(cu_device) / 1024**3,
-    "GB"
-)
-
-print(
-    "CUDA reserved:",
-    torch.cuda.memory_reserved(cu_device) / 1024**3,
-    "GB"
-)
 
 # %% [markdown]
 # ### 1-3. Load and Run plain(non HE) Model for Comparison

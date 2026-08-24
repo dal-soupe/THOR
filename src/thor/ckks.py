@@ -354,10 +354,6 @@ class CkksEngine(Engine):
     def load_plaintext_weights(self, filename: str | Path) -> dict[str, Any]:
         with Path(filename).open("rb") as stream:
             payload = pickle.load(stream)
-        if not isinstance(payload, dict) or payload.get("format") != self._WEIGHT_FORMAT:
-            raise ValueError(
-                "This is not a DesiloFHE THOR weight file; re-run encode.py to migrate it"
-            )
         return self._map_plaintexts(payload["weights"], serialize=False)
 
     def _map_plaintexts(self, value: Any, *, serialize: bool) -> Any:
