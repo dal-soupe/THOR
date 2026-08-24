@@ -34,6 +34,8 @@ from thor.bert import ThorBert, ThorBertFF, ThorBertPooler, ThorBertClassifier
 
 # %%
 import subprocess
+import gc
+from pathlib import Path
 
 def gpu_memory():
     output = subprocess.check_output(
@@ -75,8 +77,6 @@ print("Memory allocated: ", torch.cuda.memory_allocated(cu_device) /1024**3)
 # **Load DesiloFHE Keys**
 
 # %%
-from pathlib import Path
-
 key_dir = Path("./keys/desilofhe")
 key_dir.mkdir(parents=True, exist_ok=True)
 
@@ -312,8 +312,8 @@ print_gpu_memory("after plain model")
 
 weights_pt = engine.load_plaintext_weights(f"./encoded_models_new/{dataset_type}/att.pkl")
 print_gpu_memory("after encoded att weights")
-ff_weights = engine.load_plaintext_weights(f"./encoded_models_new/{dataset_type}/ff.pkl")
-print_gpu_memory("after encoded ff weights")
+ff_weights_dir = Path(f"./encoded_models_new/{dataset_type}")
+print_gpu_memory("before per-layer ff loading")
 pooler_weights = engine.load_plaintext_weights(f"./encoded_models_new/{dataset_type}/pooler.pkl")
 print_gpu_memory("after encoded pooler weights")
 classifier_weights = engine.load_plaintext_weights(f"./encoded_models_new/{dataset_type}/cls.pkl")
@@ -328,15 +328,35 @@ print_gpu_memory("after encoded cls weights")
 evaluator = ThorLinearEvaluator(engine) #LinearEvaluator does operations such as HE-matmul.
 
 thor_bert = ThorBert(evaluator, weights_pt)
-thor_ffs = []
-
-for i in range(12):
-    thor_ffs.append(ThorBertFF(evaluator, ff_weights, i))
-thor_bert.ffs = thor_ffs
+thor_bert.ffs.clear()
 thor_bert.pooler = ThorBertPooler(evaluator, pooler_weights)
 thor_bert.classifier = ThorBertClassifier(evaluator, classifier_weights)
 
 print_gpu_memory("after thor evaluator and thor_bert")
+
+
+def load_thor_ff(layer_idx: int) -> ThorBertFF:
+    ff_layer_path = ff_weights_dir / f"ff_layer_{layer_idx}.pkl"
+    ff_weights = engine.load_plaintext_weights(ff_layer_path)
+    return ThorBertFF(evaluator, ff_weights, layer_idx)
+
+
+def run_he_layer(x_in, layer: int, plot_i: int = 0):
+    global layer_idx, thor_attention, thor_ff
+    layer_idx = layer
+    thor_attention = thor_bert.attentions[layer_idx]
+    thor_ff = load_thor_ff(layer_idx)
+    try:
+        x_out, variables = forward_layer(x_in)
+    finally:
+        thor_ff.cpu()
+        del thor_ff
+        gc.collect()
+        torch.cuda.empty_cache()
+        print_gpu_memory(f"after releasing ff layer {layer_idx}")
+    variables_list.append(variables)
+    plot_variables(variables, plot_i)
+    return x_out, variables
 
 # %% [markdown]
 # **Define Forward Layer Function**
@@ -466,7 +486,6 @@ def forward_layer(x):
             ln2_out[i] = engine.level_down(ln2_out[i], 8)
         
     thor_attention.cpu()
-    thor_ff.cpu()
     return ln2_out, (x, q_wo_rescale, sftmx_in, sftmx_out, att_context, ln1_in, ln1_out, gelu_in_wo_bs, gelu_out, dense2_out, ln2_in, ln2_out)
 
 # %% [markdown]
@@ -542,132 +561,84 @@ def plot_variables(variables, i=0, j=0, h=0):
 
 # %%
 layer_idx = 0
-thor_attention = thor_bert.attentions[layer_idx]
-thor_ff = thor_bert.ffs[layer_idx]
-x1, variables =  forward_layer(x)
-variables_list.append(variables)
-plot_variables(variables,0)
+x1, variables = run_he_layer(x, 0, plot_i=0)
 
 # %% [markdown]
 # ### 2-2. Run and Plot Layer 1
 
 # %%
 layer_idx = 1
-thor_attention = thor_bert.attentions[layer_idx]    
-thor_ff = thor_bert.ffs[layer_idx]
-x2 , variables2 = forward_layer(x1)
-variables_list.append(variables2)
-plot_variables(variables2, 0)
+x2 , variables2 = run_he_layer(x1, 1, plot_i=0)
 
 # %% [markdown]
 # ### 2-3. Run and Plot Layer 2
 
 # %%
 layer_idx = 2
-thor_attention = thor_bert.attentions[layer_idx]
-thor_ff = thor_bert.ffs[layer_idx]
-x3, variables3 = forward_layer(x2)
-variables_list.append(variables3)
-plot_variables(variables3, 0)
+x3, variables3 = run_he_layer(x2, 2, plot_i=0)
 
 # %% [markdown]
 # ### 2-4. Run and Plot Layer 3
 
 # %%
 layer_idx = 3
-thor_attention = thor_bert.attentions[layer_idx]
-thor_ff = thor_bert.ffs[layer_idx]
-x4, variables = forward_layer(x3)
-variables_list.append(variables)
-plot_variables(variables, 0)
+x4, variables = run_he_layer(x3, 3, plot_i=0)
 
 # %% [markdown]
 # ### 2-5. Run and Plot Layer 4
 
 # %%
 layer_idx = 4
-thor_attention = thor_bert.attentions[layer_idx]
-thor_ff = thor_bert.ffs[layer_idx]
-x5 , variables = forward_layer(x4)
-variables_list.append(variables)
-plot_variables(variables)
+x5 , variables = run_he_layer(x4, 4)
 
 # %% [markdown]
 # ### 2-6. Run and Plot Layer 5
 
 # %%
 layer_idx = 5
-thor_attention = thor_bert.attentions[layer_idx]
-thor_ff = thor_bert.ffs[layer_idx]
-x6 , variables = forward_layer(x5)
-variables_list.append(variables)
-plot_variables(variables)
+x6 , variables = run_he_layer(x5, 5)
 
 # %% [markdown]
 # ### 2-7. Run and Plot Layer 6
 
 # %%
 layer_idx = 6
-thor_attention = thor_bert.attentions[layer_idx]
-thor_ff = thor_bert.ffs[layer_idx]
-x7, variables = forward_layer(x6)
-variables_list.append(variables)
-plot_variables(variables)
+x7, variables = run_he_layer(x6, 6)
 
 # %% [markdown]
 # ### 2-8. Run and Plot Layer 7
 
 # %%
 layer_idx = 7
-thor_attention = thor_bert.attentions[layer_idx]
-thor_ff = thor_bert.ffs[layer_idx]
-x8 , variables = forward_layer(x7)
-variables_list.append(variables)
-plot_variables(variables)
+x8 , variables = run_he_layer(x7, 7)
 
 # %% [markdown]
 # ### 2-9. Run and Plot Layer 8
 
 # %%
 layer_idx = 8
-thor_attention = thor_bert.attentions[layer_idx]
-thor_ff = thor_bert.ffs[layer_idx]
-x9, variables = forward_layer(x8)
-variables_list.append(variables)
-plot_variables(variables)
+x9, variables = run_he_layer(x8, 8)
 
 # %% [markdown]
 # ### 2-10. Run and Plot Layer 9
 
 # %%
 layer_idx = 9
-thor_attention = thor_bert.attentions[layer_idx]
-thor_ff = thor_bert.ffs[layer_idx]
-x10, variables = forward_layer(x9)
-variables_list.append(variables)
-plot_variables(variables)
+x10, variables = run_he_layer(x9, 9)
 
 # %% [markdown]
 # ### 2-11. Run and Plot Layer 10
 
 # %%
 layer_idx = 10
-thor_attention = thor_bert.attentions[layer_idx]
-thor_ff = thor_bert.ffs[layer_idx]
-x11, variables = forward_layer(x10)
-variables_list.append(variables)
-plot_variables(variables)
+x11, variables = run_he_layer(x10, 10)
 
 # %% [markdown]
 # ### 2-12. Run and Plot Layer 11
 
 # %%
 layer_idx = 11
-thor_attention = thor_bert.attentions[layer_idx]
-thor_ff = thor_bert.ffs[layer_idx]
-x12, variables = forward_layer(x11)
-variables_list.append(variables)
-plot_variables(variables)
+x12, variables = run_he_layer(x11, 11)
 
 # %% [markdown]
 # ## 3. Run Pooler and Classification
@@ -714,5 +685,3 @@ print(f"Predicted by HE: {pred}, Ground Truth: {label}")
 
 # %% [markdown]
 # 
-
-
