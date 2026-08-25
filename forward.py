@@ -77,7 +77,7 @@ print("Memory allocated: ", torch.cuda.memory_allocated(cu_device) /1024**3)
 # **Load DesiloFHE Keys**
 
 # %%
-key_dir = Path("./keys/desilofhe")
+key_dir = Path("./keys/desilofhesplit17")
 key_dir.mkdir(parents=True, exist_ok=True)
 
 # %%
@@ -310,13 +310,15 @@ for layer in range(12):
 # %%
 print_gpu_memory("after plain model")
 
-weights_pt = engine.load_plaintext_weights(f"./encoded_models_new/{dataset_type}/att.pkl")
+encoded_model_dir = "encoded_models_split17"
+
+weights_pt = engine.load_plaintext_weights(f"./{encoded_model_dir}/{dataset_type}/att.pkl")
 print_gpu_memory("after encoded att weights")
-ff_weights_dir = Path(f"./encoded_models_new/{dataset_type}")
+ff_weights_dir = Path(f"./{encoded_model_dir}/{dataset_type}")
 print_gpu_memory("before per-layer ff loading")
-pooler_weights = engine.load_plaintext_weights(f"./encoded_models_new/{dataset_type}/pooler.pkl")
+pooler_weights = engine.load_plaintext_weights(f"./{encoded_model_dir}/{dataset_type}/pooler.pkl")
 print_gpu_memory("after encoded pooler weights")
-classifier_weights = engine.load_plaintext_weights(f"./encoded_models_new/{dataset_type}/cls.pkl")
+classifier_weights = engine.load_plaintext_weights(f"./{encoded_model_dir}/{dataset_type}/cls.pkl")
 
 print_gpu_memory("after encoded cls weights")
 
