@@ -310,15 +310,21 @@ for layer in range(12):
 # %%
 print_gpu_memory("after plain model")
 
-encoded_model_dir = "encoded_models_split17"
+SPLIT_FF_BY_LAYER = True
+encoded_model_dir = Path("encoded_models_split17")
+model_weights_dir = encoded_model_dir / dataset_type
 
-weights_pt = engine.load_plaintext_weights(f"./{encoded_model_dir}/{dataset_type}/att.pkl")
+weights_pt = engine.load_plaintext_weights(model_weights_dir / "att.pkl")
 print_gpu_memory("after encoded att weights")
-ff_weights_dir = Path(f"./{encoded_model_dir}/{dataset_type}")
-print_gpu_memory("before per-layer ff loading")
-pooler_weights = engine.load_plaintext_weights(f"./{encoded_model_dir}/{dataset_type}/pooler.pkl")
+ff_weights = None
+if SPLIT_FF_BY_LAYER:
+    print_gpu_memory("before per-layer ff loading")
+else:
+    ff_weights = engine.load_plaintext_weights(model_weights_dir / "ff.pkl")
+    print_gpu_memory("after encoded ff weights")
+pooler_weights = engine.load_plaintext_weights(model_weights_dir / "pooler.pkl")
 print_gpu_memory("after encoded pooler weights")
-classifier_weights = engine.load_plaintext_weights(f"./{encoded_model_dir}/{dataset_type}/cls.pkl")
+classifier_weights = engine.load_plaintext_weights(model_weights_dir / "cls.pkl")
 
 print_gpu_memory("after encoded cls weights")
 
@@ -330,7 +336,10 @@ print_gpu_memory("after encoded cls weights")
 evaluator = ThorLinearEvaluator(engine) #LinearEvaluator does operations such as HE-matmul.
 
 thor_bert = ThorBert(evaluator, weights_pt)
-thor_bert.ffs.clear()
+if SPLIT_FF_BY_LAYER:
+    thor_bert.ffs.clear()
+else:
+    thor_bert.ffs = [ThorBertFF(evaluator, ff_weights, layer) for layer in range(12)]
 thor_bert.pooler = ThorBertPooler(evaluator, pooler_weights)
 thor_bert.classifier = ThorBertClassifier(evaluator, classifier_weights)
 
@@ -338,9 +347,12 @@ print_gpu_memory("after thor evaluator and thor_bert")
 
 
 def load_thor_ff(layer_idx: int) -> ThorBertFF:
-    ff_layer_path = ff_weights_dir / f"ff_layer_{layer_idx}.pkl"
-    ff_weights = engine.load_plaintext_weights(ff_layer_path)
-    return ThorBertFF(evaluator, ff_weights, layer_idx)
+    if not SPLIT_FF_BY_LAYER:
+        return thor_bert.ffs[layer_idx]
+
+    ff_layer_path = model_weights_dir / f"ff_layer_{layer_idx}.pkl"
+    layer_weights = engine.load_plaintext_weights(ff_layer_path)
+    return ThorBertFF(evaluator, layer_weights, layer_idx)
 
 
 def run_he_layer(x_in, layer: int, plot_i: int = 0):
@@ -353,7 +365,8 @@ def run_he_layer(x_in, layer: int, plot_i: int = 0):
     finally:
         thor_ff.cpu()
         del thor_ff
-        gc.collect()
+        if SPLIT_FF_BY_LAYER:
+            gc.collect()
         torch.cuda.empty_cache()
         print_gpu_memory(f"after releasing ff layer {layer_idx}")
     variables_list.append(variables)
