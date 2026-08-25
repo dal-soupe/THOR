@@ -324,9 +324,6 @@ else:
     print_gpu_memory("after encoded ff weights")
 pooler_weights = engine.load_plaintext_weights(model_weights_dir / "pooler.pkl")
 print_gpu_memory("after encoded pooler weights")
-classifier_weights = engine.load_plaintext_weights(model_weights_dir / "cls.pkl")
-
-print_gpu_memory("after encoded cls weights")
 
 # %% [markdown]
 # **Initiate HE Model**
@@ -341,7 +338,7 @@ if SPLIT_FF_BY_LAYER:
 else:
     thor_bert.ffs = [ThorBertFF(evaluator, ff_weights, layer) for layer in range(12)]
 thor_bert.pooler = ThorBertPooler(evaluator, pooler_weights)
-thor_bert.classifier = ThorBertClassifier(evaluator, classifier_weights)
+thor_bert.classifier = None
 
 print_gpu_memory("after thor evaluator and thor_bert")
 
@@ -353,6 +350,21 @@ def load_thor_ff(layer_idx: int) -> ThorBertFF:
     ff_layer_path = model_weights_dir / f"ff_layer_{layer_idx}.pkl"
     layer_weights = engine.load_plaintext_weights(ff_layer_path)
     return ThorBertFF(evaluator, layer_weights, layer_idx)
+
+
+def run_classifier(x_in):
+    classifier_weights = engine.load_plaintext_weights(model_weights_dir / "cls.pkl")
+    classifier = ThorBertClassifier(evaluator, classifier_weights)
+    try:
+        classifier.to(devices)
+        return classifier.forward(x_in)
+    finally:
+        classifier.cpu()
+        del classifier
+        del classifier_weights
+        gc.collect()
+        torch.cuda.empty_cache()
+        print_gpu_memory("after releasing classifier weights")
 
 
 def run_he_layer(x_in, layer: int, plot_i: int = 0):
@@ -669,8 +681,7 @@ x = thor_bert.pooler.forward(x12)
 # ### 3-2. Run Classification
 
 # %%
-thor_bert.classifier.to(devices)
-x = thor_bert.classifier.forward(x)
+x = run_classifier(x)
 
 # %% [markdown]
 # ### 4. Comparison between the prediction and the actual label
