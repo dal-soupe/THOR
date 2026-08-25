@@ -392,7 +392,8 @@ def run_he_layer(x_in, layer: int, plot_i: int = 0):
 import time
 
 def forward_layer(x):
-    global engine, evaluator, thor_attention,thor_ff, layer_idx, thor_attention_mask, time1, time2, time3, time4, time5, time6, time7, time8, time9, time10, time11, time12, time13, time14
+    global engine, evaluator, thor_attention,thor_ff, layer_idx, thor_attention_mask
+    global time1, time2, time3, time4, time5, time6, time7, time8, time9, time10, time11, time12, time13, time14
     
     thor_attention.to(devices)
     thor_ff.to(devices)
