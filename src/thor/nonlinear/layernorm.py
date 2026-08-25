@@ -114,6 +114,7 @@ def he_invsqrt(engine:CkksEngine, numerator, denominator,e,alpha, mask=np.array(
             an = engine.mult_int_scalar(an,2**6)
             an = engine.bootstrap(an)
             an = engine.mult_scalar(an, 1/2**6)
+            bn1 = engine.intt(bn1)
             bn1 = engine.bootstrap(bn1)
             bn1 = engine.mult_scalar(bn1,2**0)
             
