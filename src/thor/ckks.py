@@ -352,8 +352,22 @@ class CkksEngine(Engine):
             pickle.dump(payload, stream)
 
     def load_plaintext_weights(self, filename: str | Path) -> dict[str, Any]:
-        with Path(filename).open("rb") as stream:
+        path = Path(filename)
+        with path.open("rb") as stream:
             payload = pickle.load(stream)
+
+        if payload.get("format") != self._WEIGHT_FORMAT:
+            raise ValueError(f"Unsupported plaintext weight format in {path}")
+
+        stored_hash = payload.get("engine_hash")
+        if stored_hash != self.build_hash:
+            raise ValueError(
+                f"Plaintext weights in {path} are incompatible with this CKKS engine "
+                f"(stored engine hash: {stored_hash!r}, current engine hash: "
+                f"{self.build_hash!r}). Regenerate this file with the same engine "
+                "parameters used for inference."
+            )
+
         return self._map_plaintexts(payload["weights"], serialize=False)
 
     def _map_plaintexts(self, value: Any, *, serialize: bool) -> Any:

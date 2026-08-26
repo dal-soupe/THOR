@@ -1,3 +1,4 @@
+import pickle
 import tempfile
 import unittest
 from pathlib import Path
@@ -93,6 +94,19 @@ class CkksEngineTest(unittest.TestCase):
         self.assertEqual(second.level, 3)
         np.testing.assert_allclose(self.decrypt(first)[:1], [2.0], atol=1e-6)
         np.testing.assert_allclose(self.decrypt(second)[:1], [4.0], atol=1e-6)
+
+    def test_plaintext_weight_loading_rejects_an_incompatible_engine(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "weights.pkl"
+            self.engine.save_plaintext_weights({}, path)
+            with path.open("rb") as stream:
+                payload = pickle.load(stream)
+            payload["engine_hash"] = "different-engine"
+            with path.open("wb") as stream:
+                pickle.dump(payload, stream)
+
+            with self.assertRaisesRegex(ValueError, "incompatible with this CKKS engine"):
+                self.engine.load_plaintext_weights(path)
 
     def test_bootstrap_requires_configured_keys(self):
         ciphertext = self.engine.encode_and_encrypt([1.0])
