@@ -678,6 +678,17 @@ x12, variables = run_he_layer(x11, 11)
 thor_bert.pooler.to(devices)
 x = thor_bert.pooler.forward(x12)
 
+# Release memory for attention weights and thor_bert
+
+thor_attention = None
+thor_bert.attentions.clear()
+del weights_pt
+del thor_bert
+gc.collect()
+torch.cuda.empty_cache()
+print_gpu_memory("after releasing attention weights")
+
+
 # %% [markdown]
 # ### 3-2. Run Classification
 
