@@ -9,12 +9,12 @@ from pathlib import Path
 from thor import ThorModelEncoder, CkksEngine
 
 SPLIT_FF_BY_LAYER = True
-ENCODED_MODEL_DIR = Path("encoded_models_14")
+ENCODED_MODEL_DIR = Path("encoded_models_split17_new")
 
 # Use THOR_FHE_MODE=gpu with the desilofhe-cu121 distribution on a CUDA host.
 engine = CkksEngine(
     mode=os.environ.get("THOR_FHE_MODE", "gpu"),
-    use_bootstrap_to_14_levels=True,
+    use_bootstrap_to_17_levels=True,
 )
 
 #Encode model

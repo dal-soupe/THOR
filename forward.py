@@ -58,7 +58,7 @@ def print_gpu_memory(label):
 # **Choose GPU**
 
 # %%
-devices = [0,1]
+devices = [0, 1, 2, 3]
 #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 cu_device = devices[0]
 with torch.cuda.device(cu_device):
@@ -311,7 +311,7 @@ for layer in range(12):
 print_gpu_memory("after plain model")
 
 SPLIT_FF_BY_LAYER = True
-encoded_model_dir = Path("encoded_models_split17")
+encoded_model_dir = Path("encoded_models_split17_new")
 model_weights_dir = encoded_model_dir / dataset_type
 
 weights_pt = engine.load_plaintext_weights(model_weights_dir / "att.pkl")
@@ -680,10 +680,11 @@ x = thor_bert.pooler.forward(x12)
 
 # Release memory for attention weights and thor_bert
 
-thor_attention = None
-thor_bert.attentions.clear()
 del weights_pt
 del thor_bert
+del thor_attention
+# thor_attention = None
+# thor_bert.attentions.clear()
 gc.collect()
 torch.cuda.empty_cache()
 print_gpu_memory("after releasing attention weights")
