@@ -677,14 +677,22 @@ x12, variables = run_he_layer(x11, 11)
 # %%
 thor_bert.pooler.to(devices)
 x = thor_bert.pooler.forward(x12)
+print_gpu_memory("after pooler forward")
 
 # Release memory for attention weights and thor_bert
 
+thor_bert.pooler.cpu()
+for attention in thor_bert.attentions:
+    attention.cpu()
+for feed_forward in thor_bert.ffs:
+    feed_forward.cpu()
+thor_bert.attentions.clear()
+thor_bert.ffs.clear()
+thor_bert.pooler.weights.clear()
+del pooler_weights
 del weights_pt
 del thor_bert
-del thor_attention
-# thor_attention = None
-# thor_bert.attentions.clear()
+thor_attention = None
 gc.collect()
 torch.cuda.empty_cache()
 print_gpu_memory("after releasing attention weights")

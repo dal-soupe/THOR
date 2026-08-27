@@ -23,7 +23,8 @@ class ThorModule:
             for index in np.ndindex(self.weights[key].shape):
                 value = self.weights[key][index]
                 if isinstance(value, (Plaintext, LightPlaintext)) and not value.is_cuda:
-                    self.engine.to_cuda(value)
+                    # self.engine.to_cuda(value)
+                    self.weights[key][index] = self.engine.to_cuda(value)
         self.devices = devices
                     
     def cpu(self):
@@ -33,7 +34,8 @@ class ThorModule:
             for index in np.ndindex(self.weights[key].shape):
                 value = self.weights[key][index]
                 if isinstance(value, (Plaintext, LightPlaintext)) and value.is_cuda:
-                    self.engine.to_cpu(value)
+                    # self.engine.to_cpu(value)
+                    self.weights[key][index] = self.engine.to_cpu(value)
         self.devices = []
 
 class ThorBert:
