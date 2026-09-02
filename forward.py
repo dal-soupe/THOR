@@ -52,6 +52,16 @@ def print_gpu_memory(label):
     print(f"[GPU] {label}: {gpu_memory()} MiB", flush=True)
 
 # %% [markdown]
+# ### 0-2. Remove warnings
+
+# %%
+import logging
+loggers = [logging.getLogger(name) for name in logging.root.manager.loggerDict]
+for logger in loggers:
+    if "transformers" in logger.name.lower():
+        logger.setLevel(logging.ERROR)
+
+# %% [markdown]
 # ### 1-1. Initiate CKKS Engine
 
 # %% [markdown]
