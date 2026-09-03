@@ -1,4 +1,10 @@
 {
   "python-envs.defaultEnvManager": "ms-python.python:conda",
-  "python-envs.defaultPackageManager": "ms-python.python:conda"
+  "python-envs.defaultPackageManager": "ms-python.python:conda",
+  "chat.tools.terminal.autoApprove": {
+    "/^python -m json\\.tool forward\\.ipynb >/dev/null$/": {
+      "approve": true,
+      "matchCommandLine": true
+    }
+  }
 }
