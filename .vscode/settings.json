@@ -5,6 +5,10 @@
     "/^python -m json\\.tool forward\\.ipynb >/dev/null$/": {
       "approve": true,
       "matchCommandLine": true
+    },
+    "/^python -m py_compile src/thor/data\\.py && git diff --check$/": {
+      "approve": true,
+      "matchCommandLine": true
     }
   }
 }
