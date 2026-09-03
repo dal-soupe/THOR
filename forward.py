@@ -70,7 +70,7 @@ for logger in loggers:
 # %%
 devices = [0, 1, 2, 3]
 #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-cu_device = devices[0]
+cu_device = devices[1]
 with torch.cuda.device(cu_device):
     torch.cuda.empty_cache()
     print(torch.cuda.memory_allocated(cu_device) /1024**3)
@@ -81,7 +81,7 @@ engine = CkksEngine(
     device_id=cu_device,
     use_bootstrap_to_17_levels=True,
 )
-print("Memory allocated: ", torch.cuda.memory_allocated(cu_device) /1024**3)
+print_gpu_memory("after engine init")
 
 # %% [markdown]
 # **Load DesiloFHE Keys**
@@ -116,7 +116,7 @@ engine.add_evk(evk)
 engine.add_gk(gk)
 engine.add_conj_key(conjk)
 engine.add_bs_key(bsk)
-print("Memory allocated: ", torch.cuda.memory_allocated(cu_device) /1024**3)
+print_gpu_memory("after key loading")
 
 # %% [markdown]
 # ### 1-2. Load and Encrypt Data
@@ -193,33 +193,11 @@ for batch in data_loader:
 # %%
 model_plain  = thor.utils.load_model(dataset_type, f'./finetuned_models/{dataset_type}/model.safetensors')
 
-print(
-    "CUDA allocated:",
-    torch.cuda.memory_allocated(cu_device) / 1024**3,
-    "GB"
-)
-
-print(
-    "CUDA reserved:",
-    torch.cuda.memory_reserved(cu_device) / 1024**3,
-    "GB"
-)
-
 model_plain.eval()
 cpu_device = torch.device("cpu")
 model_plain.to(cpu_device)
 
-print(
-    "CUDA allocated:",
-    torch.cuda.memory_allocated(cu_device) / 1024**3,
-    "GB"
-)
-
-print(
-    "CUDA reserved:",
-    torch.cuda.memory_reserved(cu_device) / 1024**3,
-    "GB"
-)
+print_gpu_memory("after loading finetuned model")
 
 idx = 0
 for batch in data_loader:
@@ -232,6 +210,8 @@ for batch in data_loader:
         with torch.no_grad():
             outputs = model_plain(**batch)
         break
+
+print_gpu_memory("after plain model")
 
 def get_nonlinear_in_out(hidden_states, layer_idx):
     with torch.no_grad():
@@ -263,7 +243,7 @@ def get_nonlinear_in_out(hidden_states, layer_idx):
         ln2_out = bert_layer_m.output.LayerNorm(ln2_in)
         pooler_m = model_plain.bert.pooler
         pooler_dense_output = pooler_m.dense(ln2_out[:, 0])
-        print(ln2_out[:, 0].shape)
+        # print(ln2_out[:, 0].shape)
         pooler_output = pooler_m.activation(pooler_dense_output)
 
     return (
@@ -318,7 +298,7 @@ for layer in range(12):
 # **Load Model Weights**
 
 # %%
-print_gpu_memory("after plain model")
+print_gpu_memory("after plain model nonlinear outputs")
 
 SPLIT_FF_BY_LAYER = True
 encoded_model_dir = Path("encoded_models_split17_new")
@@ -364,6 +344,7 @@ def load_thor_ff(layer_idx: int) -> ThorBertFF:
 
 def run_classifier(x_in):
     classifier_weights = engine.load_plaintext_weights(model_weights_dir / "cls.pkl")
+    print_gpu_memory("after encoded classifier weights")
     classifier = ThorBertClassifier(evaluator, classifier_weights)
     try:
         classifier.to(devices)
@@ -691,21 +672,43 @@ print_gpu_memory("after pooler forward")
 
 # Release memory for attention weights and thor_bert
 
-thor_bert.pooler.cpu()
 for attention in thor_bert.attentions:
     attention.cpu()
+thor_bert.attentions.clear()
+thor_attention = None
+gc.collect()
+torch.cuda.empty_cache()
+print_gpu_memory("after releasing 1")
+
 for feed_forward in thor_bert.ffs:
     feed_forward.cpu()
-thor_bert.attentions.clear()
 thor_bert.ffs.clear()
+thor_bert.pooler.cpu()
 thor_bert.pooler.weights.clear()
 del pooler_weights
 del weights_pt
 del thor_bert
-thor_attention = None
+del model_plain
 gc.collect()
 torch.cuda.empty_cache()
-print_gpu_memory("after releasing attention weights")
+print_gpu_memory("after releasing 2")
+
+del variables
+del variables2
+del variables3
+del x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12
+
+gc.collect()
+torch.cuda.empty_cache()
+print_gpu_memory("after releasing 3")
+
+variables_list.clear()
+del variables_list
+del outputs
+
+gc.collect()
+torch.cuda.empty_cache()
+print_gpu_memory("after releasing 4")
 
 
 # %% [markdown]
