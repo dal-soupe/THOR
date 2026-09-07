@@ -20,3 +20,5 @@ Check engine shape (slot_count, size, size) size=2^log_coeff_count:
 (16, 512, 512)
 (4, 2048, 2048)
 (256, 64, 64)
+
+**Problem** Desilo GL does not have bootstrapping
