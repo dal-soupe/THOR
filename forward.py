@@ -21,6 +21,7 @@ if project_root not in sys.path:
 
 import numpy as np
 import math
+import time
 import torch
 from transformers import BertForNextSentencePrediction
 import matplotlib.pyplot as plt
@@ -70,7 +71,7 @@ for logger in loggers:
 # %%
 devices = [0, 1, 2, 3]
 #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-cu_device = devices[0]
+cu_device = devices[2]
 with torch.cuda.device(cu_device):
     torch.cuda.empty_cache()
     print(torch.cuda.memory_allocated(cu_device) /1024**3)
@@ -81,7 +82,7 @@ engine = CkksEngine(
     device_id=cu_device,
     use_bootstrap_to_17_levels=True,
 )
-print("Memory allocated: ", torch.cuda.memory_allocated(cu_device) /1024**3)
+print_gpu_memory("after engine init")
 
 # %% [markdown]
 # **Load DesiloFHE Keys**
@@ -116,7 +117,7 @@ engine.add_evk(evk)
 engine.add_gk(gk)
 engine.add_conj_key(conjk)
 engine.add_bs_key(bsk)
-print("Memory allocated: ", torch.cuda.memory_allocated(cu_device) /1024**3)
+print_gpu_memory("after key loading")
 
 # %% [markdown]
 # ### 1-2. Load and Encrypt Data
@@ -128,17 +129,20 @@ print("Memory allocated: ", torch.cuda.memory_allocated(cu_device) /1024**3)
 dataset_type = 'mrpc'
 target_idx = 0
 
+# Plain inference is cheap enough to sample broadly; FHE inference is not.
+PERFORMANCE_CHECK_PLAIN_SAMPLES = 32
+
 # %% [markdown]
 # **Initiate DataEncryptor and DataLoader**
 
 # %%
-dataset = f'./datasets/{dataset_type}'
+dataset = f'~/data/THOR/datasets/{dataset_type}'
 
 data_encryptor = ThorDataEncryptor(dataset_type, dataset,
                                    embedding_model=BertForNextSentencePrediction.from_pretrained('bert-base-uncased').bert.embeddings, 
                                    ckks_engine=engine, test=False)
 data_loader = data_encryptor.eval_dataloader
-
+    
 # %% [markdown]
 # **Encrypt Data as "x"**
 
@@ -191,35 +195,13 @@ for batch in data_loader:
 # **Load and Run Plain Model**
 
 # %%
-model_plain  = thor.utils.load_model(dataset_type, f'./finetuned_models/{dataset_type}/model.safetensors')
-
-print(
-    "CUDA allocated:",
-    torch.cuda.memory_allocated(cu_device) / 1024**3,
-    "GB"
-)
-
-print(
-    "CUDA reserved:",
-    torch.cuda.memory_reserved(cu_device) / 1024**3,
-    "GB"
-)
+model_plain  = thor.utils.load_model(dataset_type, f'~/data/THOR/finetuned_models/{dataset_type}/model.safetensors')
 
 model_plain.eval()
 cpu_device = torch.device("cpu")
 model_plain.to(cpu_device)
 
-print(
-    "CUDA allocated:",
-    torch.cuda.memory_allocated(cu_device) / 1024**3,
-    "GB"
-)
-
-print(
-    "CUDA reserved:",
-    torch.cuda.memory_reserved(cu_device) / 1024**3,
-    "GB"
-)
+print_gpu_memory("after loading finetuned model")
 
 idx = 0
 for batch in data_loader:
@@ -230,8 +212,12 @@ for batch in data_loader:
     elif idx == target_idx:
         batch = {k: v.to(cpu_device) if torch.is_tensor(v) else v for k, v in batch.items()}
         with torch.no_grad():
+            plain_inference_start = time.perf_counter()
             outputs = model_plain(**batch)
+            plain_inference_seconds = time.perf_counter() - plain_inference_start
         break
+
+print_gpu_memory("after plain model")
 
 def get_nonlinear_in_out(hidden_states, layer_idx):
     with torch.no_grad():
@@ -263,7 +249,7 @@ def get_nonlinear_in_out(hidden_states, layer_idx):
         ln2_out = bert_layer_m.output.LayerNorm(ln2_in)
         pooler_m = model_plain.bert.pooler
         pooler_dense_output = pooler_m.dense(ln2_out[:, 0])
-        print(ln2_out[:, 0].shape)
+        # print(ln2_out[:, 0].shape)
         pooler_output = pooler_m.activation(pooler_dense_output)
 
     return (
@@ -318,10 +304,10 @@ for layer in range(12):
 # **Load Model Weights**
 
 # %%
-print_gpu_memory("after plain model")
+print_gpu_memory("after plain model nonlinear outputs")
 
 SPLIT_FF_BY_LAYER = True
-encoded_model_dir = Path("encoded_models_split17_new")
+encoded_model_dir = Path("./encoded_models_split17_new")
 model_weights_dir = encoded_model_dir / dataset_type
 
 weights_pt = engine.load_plaintext_weights(model_weights_dir / "att.pkl")
@@ -329,6 +315,7 @@ print_gpu_memory("after encoded att weights")
 ff_weights = None
 if SPLIT_FF_BY_LAYER:
     print_gpu_memory("before per-layer ff loading")
+    # pass
 else:
     ff_weights = engine.load_plaintext_weights(model_weights_dir / "ff.pkl")
     print_gpu_memory("after encoded ff weights")
@@ -364,6 +351,7 @@ def load_thor_ff(layer_idx: int) -> ThorBertFF:
 
 def run_classifier(x_in):
     classifier_weights = engine.load_plaintext_weights(model_weights_dir / "cls.pkl")
+    print_gpu_memory("after encoded classifier weights")
     classifier = ThorBertClassifier(evaluator, classifier_weights)
     try:
         classifier.to(devices)
@@ -383,7 +371,9 @@ def run_he_layer(x_in, layer: int, plot_i: int = 0):
     thor_attention = thor_bert.attentions[layer_idx]
     thor_ff = load_thor_ff(layer_idx)
     try:
+        layer_start = time.perf_counter()
         x_out, variables = forward_layer(x_in)
+        fhe_layer_times[layer] = time.perf_counter() - layer_start
     finally:
         thor_ff.cpu()
         del thor_ff
@@ -399,11 +389,8 @@ def run_he_layer(x_in, layer: int, plot_i: int = 0):
 # **Define Forward Layer Function**
 
 # %%
-import time
-
 def forward_layer(x):
     global engine, evaluator, thor_attention,thor_ff, layer_idx, thor_attention_mask
-    global time1, time2, time3, time4, time5, time6, time7, time8, time9, time10, time11, time12, time13, time14
     
     thor_attention.to(devices)
     thor_ff.to(devices)
@@ -530,46 +517,72 @@ def forward_layer(x):
 # ## 2. Forward Attention Layers
 
 # %% [markdown]
-# ### 2-1. Run and Plot Layer 0
-
-# %% [markdown]
 # **Code for Plotting and Comparison with Plain Model**
 
 # %%
 variables_list = []
+fhe_layer_times = {}
 h_indices = [np.where(np.arange(0, 2**11) % 16 == i) for i in range(12)]
 
 def plot_variables(variables, i=0, j=0, h=0):
     global layer_idx, sk, h_indices, engine, dd
-    variable_names = ['x', 'q', 'sftmx_in', 'sftmx_out', 'att_context', 'ln1_in', 'ln1_out', 'gelu_in_wo_bs', 'gelu_out', 'dense2_out', 'ln2_in', 'ln2_out']
-    global_vars = [hidden_states, qs, sftmx_ins,  sftmx_outs, att_contexts, ln1_ins, ln1_outs, gelu_ins, gelu_outs, dense2_outs, ln2_ins, ln2_outs]
+
+    variable_names = [
+        'x', 'q', 'sftmx_in', 'sftmx_out',
+        'att_context', 'ln1_in', 'ln1_out',
+        'gelu_in_wo_bs', 'gelu_out', 'dense2_out',
+        'ln2_in', 'ln2_out'
+    ]
+
+    global_vars = [
+        hidden_states, qs, sftmx_ins, sftmx_outs,
+        att_contexts, ln1_ins, ln1_outs,
+        gelu_ins, gelu_outs, dense2_outs,
+        ln2_ins, ln2_outs
+    ]
 
     fig, axs = plt.subplots(4, 3, figsize=(15, 15))
-    fig.suptitle(f'Variables Plot (Layer {layer_idx+1})', fontsize=16)
+    fig.suptitle(
+        f'Variables Plot (Layer {layer_idx + 1})',
+        fontsize=16
+    )
 
-    for index, (var, name, global_var) in enumerate(zip(variables, variable_names, global_vars)):
+    for index, (var, name, global_var) in enumerate(
+        zip(variables, variable_names, global_vars)
+    ):
         row = index // 3
         col = index % 3
-        
+        ax_he = axs[row, col]
+
+        # Flatten variable if necessary
         if isinstance(var, np.ndarray) and var.ndim > 1:
             var = var[0]
-        
+
         if len(var) <= i:
             print(f'{name} is not available: shape is {len(var)}')
             continue
-        
-        current_var = engine.decrypt(var[i], sk).real[2**11*j:2**11*(j+1)][h_indices[h]]
+
+        # HE value
+        current_var = engine.decrypt(
+            var[i], sk
+        ).real[2**11 * j:2**11 * (j + 1)][h_indices[h]]
+
+        # Plaintext value
         global_var = global_var[layer_idx]
 
         if global_var.ndim == 3:
             global_var = global_var[h].T
-        elif name in ['gelu_in', 'gelu_out', 'gelu_in_wo_bs']:
+        elif name in ['gelu_in_wo_bs', 'gelu_out']:
             global_var = np.vsplit(global_var.T, 24)[0]
         else:
             global_var = np.vsplit(global_var.T, 6)[h]
-        
-        global_var_layer = thor.utils.matrix.ld(global_var, i*16+j)
 
+        global_var_layer = thor.utils.matrix.ld(
+            global_var,
+            i * 16 + j
+        )
+
+        # Scaling corrections
         if name == 'sftmx_in':
             global_var_layer = global_var_layer[:40]
             current_var = current_var[:40]
@@ -578,105 +591,60 @@ def plot_variables(variables, i=0, j=0, h=0):
                 current_var = current_var * 32
             else:
                 current_var = current_var * 64
+
         elif name == 'gelu_in_wo_bs':
             current_var = current_var * 64
-        elif name == "ln2_in" :
-            current_var = current_var/2
-            
-        axs[row, col].plot(current_var, label=f'HE {name}')
-        axs[row, col].plot(global_var_layer, label=f'Plain {name}', linestyle='--')
-        axs[row, col].set_title(name)
-        axs[row, col].grid(True)
-        axs[row, col].legend()
 
-    for ax in axs.flat:
-        ax.set(xlabel='Index', ylabel='Decoded Value')
+        elif name == 'ln2_in':
+            current_var = current_var / 2
 
-    axs[-1, -1].axis('off')
+        # Plot HE on left axis
+        x_he = np.arange(len(current_var))
+        line_he = ax_he.plot(
+            x_he,
+            current_var,
+            label=f'HE {name}'
+        )[0]
+        ax_he.set_xlabel('Index')
+        ax_he.set_ylabel('HE', color=line_he.get_color())
+        ax_he.tick_params(axis='y', labelcolor=line_he.get_color())
+        ax_he.grid(True)
+
+        # Plot plaintext on right axis
+        ax_plain = ax_he.twinx()
+        x_plain = np.arange(len(global_var_layer))
+        line_plain = ax_plain.plot(
+            x_plain,
+            global_var_layer,
+            linestyle='--',
+            label=f'Plain {name}',
+            color='C1'
+        )[0]
+
+        ax_plain.set_ylabel(
+            'Plaintext',
+            color='C1'
+        )
+        ax_plain.tick_params(
+            axis='y',
+            labelcolor='C1'
+        )
+        ax_he.set_title(name)
+
+        lines = [line_he, line_plain]
+        labels = [line.get_label() for line in lines]
+        ax_he.legend(lines, labels, loc='best')
 
     plt.tight_layout()
     plt.show()
 
-# %%
-layer_idx = 0
-x1, variables = run_he_layer(x, 0, plot_i=0)
 
 # %% [markdown]
-# ### 2-2. Run and Plot Layer 1
+# ### 2-1. Run and Plot All Layers
 
 # %%
-layer_idx = 1
-x2 , variables2 = run_he_layer(x1, 1, plot_i=0)
-
-# %% [markdown]
-# ### 2-3. Run and Plot Layer 2
-
-# %%
-layer_idx = 2
-x3, variables3 = run_he_layer(x2, 2, plot_i=0)
-
-# %% [markdown]
-# ### 2-4. Run and Plot Layer 3
-
-# %%
-layer_idx = 3
-x4, variables = run_he_layer(x3, 3, plot_i=0)
-
-# %% [markdown]
-# ### 2-5. Run and Plot Layer 4
-
-# %%
-layer_idx = 4
-x5 , variables = run_he_layer(x4, 4)
-
-# %% [markdown]
-# ### 2-6. Run and Plot Layer 5
-
-# %%
-layer_idx = 5
-x6 , variables = run_he_layer(x5, 5)
-
-# %% [markdown]
-# ### 2-7. Run and Plot Layer 6
-
-# %%
-layer_idx = 6
-x7, variables = run_he_layer(x6, 6)
-
-# %% [markdown]
-# ### 2-8. Run and Plot Layer 7
-
-# %%
-layer_idx = 7
-x8 , variables = run_he_layer(x7, 7)
-
-# %% [markdown]
-# ### 2-9. Run and Plot Layer 8
-
-# %%
-layer_idx = 8
-x9, variables = run_he_layer(x8, 8)
-
-# %% [markdown]
-# ### 2-10. Run and Plot Layer 9
-
-# %%
-layer_idx = 9
-x10, variables = run_he_layer(x9, 9)
-
-# %% [markdown]
-# ### 2-11. Run and Plot Layer 10
-
-# %%
-layer_idx = 10
-x11, variables = run_he_layer(x10, 10)
-
-# %% [markdown]
-# ### 2-12. Run and Plot Layer 11
-
-# %%
-layer_idx = 11
-x12, variables = run_he_layer(x11, 11)
+for layer_idx in range(12):
+    x, variables = run_he_layer(x, layer_idx, plot_i=0)
 
 # %% [markdown]
 # ## 3. Run Pooler and Classification
@@ -686,33 +654,47 @@ x12, variables = run_he_layer(x11, 11)
 
 # %%
 thor_bert.pooler.to(devices)
-x = thor_bert.pooler.forward(x12)
+pooler_start = time.perf_counter()
+x = thor_bert.pooler.forward(x)
+fhe_pooler_seconds = time.perf_counter() - pooler_start
 print_gpu_memory("after pooler forward")
 
 # Release memory for attention weights and thor_bert
 
-thor_bert.pooler.cpu()
 for attention in thor_bert.attentions:
     attention.cpu()
-for feed_forward in thor_bert.ffs:
-    feed_forward.cpu()
 thor_bert.attentions.clear()
-thor_bert.ffs.clear()
-thor_bert.pooler.weights.clear()
-del pooler_weights
-del weights_pt
-del thor_bert
 thor_attention = None
 gc.collect()
 torch.cuda.empty_cache()
-print_gpu_memory("after releasing attention weights")
+print_gpu_memory("after releasing 1")
+
+for feed_forward in thor_bert.ffs:
+    feed_forward.cpu()
+thor_bert.ffs.clear()
+del weights_pt
+del thor_bert
+gc.collect()
+torch.cuda.empty_cache()
+print_gpu_memory("after releasing 2")
+
+variables_list.clear()
+del variables_list
+# del outputs
+
+gc.collect()
+torch.cuda.empty_cache()
+print_gpu_memory("after releasing 4")
 
 
 # %% [markdown]
 # ### 3-2. Run Classification
 
 # %%
+classifier_start = time.perf_counter()
 x = run_classifier(x)
+fhe_classifier_seconds = time.perf_counter() - classifier_start
+fhe_model_seconds = sum(fhe_layer_times.values()) + fhe_pooler_seconds + fhe_classifier_seconds
 
 # %% [markdown]
 # ### 4. Comparison between the prediction and the actual label
@@ -733,12 +715,57 @@ b = engine.decrypt(x[1], sk)[0]
 
 # Predict 0 if a > b, otherwise predict 1
 pred = 0 if a > b else 1
+plain_target_pred = outputs.logits.argmax(dim=-1).item()
 
 # Retrieve the ground-truth label from the validation set
 label = val_set["label"][target_idx]
 
 # Display the prediction and the actual label
 print(f"Predicted by HE: {pred}, Ground Truth: {label}")
+
+# %% [markdown]
+# ### 4-1. Inference performance check
+
+# %%
+plain_sample_times = []
+plain_sample_predictions = []
+plain_sample_labels = []
+for sample_idx, sample_batch in enumerate(data_loader):
+    if sample_idx >= PERFORMANCE_CHECK_PLAIN_SAMPLES:
+        break
+    sample_batch = {
+        key: value.to(cpu_device) if torch.is_tensor(value) else value
+        for key, value in sample_batch.items()
+    }
+    with torch.inference_mode():
+        sample_start = time.perf_counter()
+        sample_outputs = model_plain(**sample_batch)
+        plain_sample_times.append(time.perf_counter() - sample_start)
+    plain_sample_predictions.append(sample_outputs.logits.argmax(dim=-1).item())
+    plain_sample_labels.append(sample_batch['labels'].item())
+
+plain_sample_times_ms = np.asarray(plain_sample_times) * 1000
+plain_accuracy = np.mean(
+    np.asarray(plain_sample_predictions) == np.asarray(plain_sample_labels)
+)
+fhe_accuracy = float(pred == label)
+
+print("\nInference performance check")
+print(f"  Samples: plain={len(plain_sample_times)}, FHE=1")
+print(f"  Plain target prediction: {plain_target_pred} (cold run: {plain_inference_seconds * 1000:.2f} ms)")
+print(f"  FHE target prediction: {pred}; prediction agreement: {pred == plain_target_pred}")
+print(f"  Plain accuracy: {plain_accuracy:.3f}; FHE accuracy: {fhe_accuracy:.3f}")
+print(f"  Plain latency mean/median/p95: {plain_sample_times_ms.mean():.2f} / "
+      f"{np.median(plain_sample_times_ms):.2f} / {np.percentile(plain_sample_times_ms, 95):.2f} ms")
+print(f"  FHE model latency: {fhe_model_seconds:.2f} s "
+      f"({1 / fhe_model_seconds:.4f} samples/s)")
+print(f"  FHE/plain median latency ratio: "
+      f"{fhe_model_seconds / (np.median(plain_sample_times_ms) / 1000):.1f}x")
+print("  FHE stage latency (seconds):")
+for layer, seconds in fhe_layer_times.items():
+    print(f"    layer {layer:02d}: {seconds:.2f}")
+print(f"    pooler: {fhe_pooler_seconds:.2f}")
+print(f"    classifier: {fhe_classifier_seconds:.2f}")
 
 # %% [markdown]
 # 
