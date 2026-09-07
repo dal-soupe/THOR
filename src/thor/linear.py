@@ -9,6 +9,8 @@ class ThorLinearEvaluator():
         self.pre_encode_masks()
                 
     #Linear Operations
+    # GL migration: replace the packed diagonal pipeline below with one native
+    # matrix_multiply call on full GL plaintext and ciphertext tensors.
     def pt_ct_matmul(self, w_t: np.ndarray, x_t: np.ndarray, mode='block_diag_1') -> np.ndarray:
         """
         @param w_t: Array of model weight plaintexts. Array shape: (n_out_packed, n_diag, n_in_complex)
@@ -39,6 +41,7 @@ class ThorLinearEvaluator():
             ct_out[out] = ct_temp
         return ct_out
 
+    # GL migration: this diagonal decomposition is unnecessary .
     def parallel_diagonal_pt_ct_mult(self, w_t: np.ndarray, x_t: np.ndarray):
         """
         Calculates the block (lower) diagonals ciphertexts of WX.T
@@ -60,6 +63,8 @@ class ThorLinearEvaluator():
                 ct_diags[out, l] = self.engine.rescale(ct_temp) #Level: l + 1, scale: delta
         return ct_diags
     
+    # GL migration: replace mask-and-rotate transposition with the native
+    # transpose operation and its ciphertext transposition key.
     def transpose_upper_to_lower(self, u: np.ndarray) -> np.ndarray:
         """
         Transpose the encrypted matrix(upper diagonal cts -> lower diagonal cts)
@@ -101,6 +106,8 @@ class ThorLinearEvaluator():
             l[i] = self.engine.add(l_temp[i][0], self.engine.rotate_left(l_temp[i][1], -2**11))
         return l
     
+    # GL migration: pack independent copies on the batch axis where possible;
+    # otherwise generate them with roll on an explicitly selected matrix axis.
     def make_rotated_copies(self, cts: np.ndarray):
         """
         Input cts: [L0, L1, ..., L15], [L16, L17, ..., L31], ...(ct array of shape (n,))
@@ -113,6 +120,8 @@ class ThorLinearEvaluator():
                 rots[16*i+j] = self.engine.rotate_left(rots[16*i+j-1], 2**11)
         return rots
     
+    # GL migration: broadcast copies while encoding inputs when possible. For
+    # encrypted expansion, combine 3D Hadamard masks with batch-axis rolls.
     def make_copies(self, cts: np.ndarray, scale=1/2):
         """
         Input cts: [L0, L1, ..., L15], [L16, L17, ..., L31], ...(ct array of shape (n,))
@@ -151,6 +160,8 @@ class ThorLinearEvaluator():
                 
         return copies #Level: l + 1
 
+    # GL migration: cyclic shifts map to axis-specific roll. Block-local shifts
+    # require 3D masks for the wrapped and non-wrapped regions before rolling.
     def rotate_internal(self, ct: FheData, delta: int=0, l_delta=0, r_delta=0, mask=None, mode=None) -> FheData:
         """
         Rotates the ciphertext internally.
@@ -180,6 +191,7 @@ class ThorLinearEvaluator():
         lrot_ct = self.engine.rotate_left(temp2, l_delta)
         return self.engine.add(lrot_ct, rrot_ct)
 
+    # GL migration: use GLEngine.rotsum rather than maintaining this duplicate.
     def rotsum(self, ct: FheData, interval: int) -> FheData:
         """
         Rotate Sum Operation
@@ -190,6 +202,8 @@ class ThorLinearEvaluator():
             temp = self.engine.cc_add(temp, self.engine.rotate_left(temp, interval*2**i))
         return temp
     
+    # GL migration: these flattened slot masks are invalid for 3D tensors.
+    # Generate shape-aware masks only after batch, row, and column layout is set.
     def pre_encode_masks(self):
         """
         Pre encode masks for algorithms such as internal rotations, make_copies and transpose.

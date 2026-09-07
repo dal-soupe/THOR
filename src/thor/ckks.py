@@ -228,9 +228,15 @@ class CkksEngine(Engine):
         return super().square(ciphertext, key)
 
     def imult(self, ciphertext: Ciphertext) -> Ciphertext:
+        """
+        multiplies ciphertext with 1j
+        """
         return super().multiply_imaginary_integer(ciphertext, 1)
 
     def minus_imult(self, ciphertext: Ciphertext) -> Ciphertext:
+        """
+        multiplies ciphertext with -1j
+        """
         return super().multiply_imaginary_integer(ciphertext, -1)
 
     def pt_ct_mult(self, plaintext: Plaintext | LightPlaintext, ciphertext: Ciphertext) -> Ciphertext:
