@@ -136,13 +136,13 @@ PERFORMANCE_CHECK_PLAIN_SAMPLES = 32
 # **Initiate DataEncryptor and DataLoader**
 
 # %%
-dataset = f'./datasets/{dataset_type}'
+dataset = f'~/data/THOR/datasets/{dataset_type}'
 
 data_encryptor = ThorDataEncryptor(dataset_type, dataset,
                                    embedding_model=BertForNextSentencePrediction.from_pretrained('bert-base-uncased').bert.embeddings, 
                                    ckks_engine=engine, test=False)
 data_loader = data_encryptor.eval_dataloader
-
+    
 # %% [markdown]
 # **Encrypt Data as "x"**
 
@@ -195,7 +195,7 @@ for batch in data_loader:
 # **Load and Run Plain Model**
 
 # %%
-model_plain  = thor.utils.load_model(dataset_type, f'./finetuned_models/{dataset_type}/model.safetensors')
+model_plain  = thor.utils.load_model(dataset_type, f'~/data/THOR/finetuned_models/{dataset_type}/model.safetensors')
 
 model_plain.eval()
 cpu_device = torch.device("cpu")
@@ -307,7 +307,7 @@ for layer in range(12):
 print_gpu_memory("after plain model nonlinear outputs")
 
 SPLIT_FF_BY_LAYER = True
-encoded_model_dir = Path("encoded_models_split17_new")
+encoded_model_dir = Path("./encoded_models_split17_new")
 model_weights_dir = encoded_model_dir / dataset_type
 
 weights_pt = engine.load_plaintext_weights(model_weights_dir / "att.pkl")
