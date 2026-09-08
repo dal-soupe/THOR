@@ -29,6 +29,13 @@ class ThorLinearEvaluator:
             raise TypeError("ciphertext must be a GLCiphertext")
         return self.engine.mmult(weight, ciphertext, matrix_key)
 
+    def parallel_diagonal_pt_ct_mult(self, w_t: Any, x_t: Any) -> GLCiphertext:
+        """Reject the CKKS diagonal algorithm; GL uses ``pt_ct_matmul``."""
+        raise NotImplementedError(
+            "GL matrices do not use packed CKKS diagonals; call pt_ct_matmul "
+            "with one GLPlaintext and one GLCiphertext"
+        )
+
     def transpose_upper_to_lower(
         self,
         value: FheData,

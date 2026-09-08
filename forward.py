@@ -39,6 +39,10 @@ import gc
 from pathlib import Path
 
 def gpu_memory():
+    """
+    Queries the amount of memory currently used by each NVIDIA GPU.
+    @return: List of used GPU memory values in MiB.
+    """
     output = subprocess.check_output(
         [
             "nvidia-smi",
@@ -50,6 +54,11 @@ def gpu_memory():
     return [int(x.strip()) for x in output.splitlines()]
 
 def print_gpu_memory(label):
+    """
+    Prints the current memory usage for every NVIDIA GPU.
+    @param label: Description of the inference stage being measured.
+    @return: None.
+    """
     print(f"[GPU] {label}: {gpu_memory()} MiB", flush=True)
 
 # %% [markdown]
@@ -149,7 +158,11 @@ data_loader = data_encryptor.eval_dataloader
 # %%
 def encode_attention_mask(engine, attention_mask:np.ndarray, level:int=15) -> np.ndarray:
     """
-    Return an array of size (8,) which contains 8 plaintexts. 
+    Encodes a BERT attention mask using the CKKS diagonal slot layout.
+    @param engine: CKKS engine used to encode each packed mask.
+    @param attention_mask: Token mask represented as an array of shape (128,).
+    @param level: Multiplication level assigned to the encoded plaintexts.
+    @return: Object array of shape (8,) containing encoded plaintext masks.
     """
     if attention_mask.shape != (128,):
         raise ValueError("Shape of attention mask should be (128,)")
@@ -220,6 +233,12 @@ for batch in data_loader:
 print_gpu_memory("after plain model")
 
 def get_nonlinear_in_out(hidden_states, layer_idx):
+    """
+    Collects plaintext intermediate values for one BERT encoder layer.
+    @param hidden_states: Plain BERT hidden states entering the encoder layer.
+    @param layer_idx: Zero-based index of the encoder layer to evaluate.
+    @return: Tuple of NumPy arrays for attention, normalization, GELU, and pooler stages.
+    """
     with torch.no_grad():
         bert_layer_m = model_plain.bert.encoder.layer[layer_idx] 
         attention_m = bert_layer_m.attention.self
@@ -341,6 +360,11 @@ print_gpu_memory("after thor evaluator and thor_bert")
 
 
 def load_thor_ff(layer_idx: int) -> ThorBertFF:
+    """
+    Loads the encrypted feed-forward evaluator for one BERT layer.
+    @param layer_idx: Zero-based index of the feed-forward layer to load.
+    @return: ThorBertFF configured with the requested layer weights.
+    """
     if not SPLIT_FF_BY_LAYER:
         return thor_bert.ffs[layer_idx]
 
@@ -350,6 +374,11 @@ def load_thor_ff(layer_idx: int) -> ThorBertFF:
 
 
 def run_classifier(x_in):
+    """
+    Runs the encrypted classifier and releases its encoded weights afterward.
+    @param x_in: Encrypted output produced by the BERT pooler.
+    @return: Encrypted classifier prediction values.
+    """
     classifier_weights = engine.load_plaintext_weights(model_weights_dir / "cls.pkl")
     print_gpu_memory("after encoded classifier weights")
     classifier = ThorBertClassifier(evaluator, classifier_weights)
@@ -366,6 +395,13 @@ def run_classifier(x_in):
 
 
 def run_he_layer(x_in, layer: int, plot_i: int = 0):
+    """
+    Runs one encrypted BERT encoder layer and records its intermediate values.
+    @param x_in: Encrypted hidden states entering the encoder layer.
+    @param layer: Zero-based index of the encoder layer to run.
+    @param plot_i: Packed ciphertext index selected for diagnostic plotting.
+    @return: Tuple containing encrypted output states and recorded intermediates.
+    """
     global layer_idx, thor_attention, thor_ff
     layer_idx = layer
     thor_attention = thor_bert.attentions[layer_idx]
@@ -390,6 +426,11 @@ def run_he_layer(x_in, layer: int, plot_i: int = 0):
 
 # %%
 def forward_layer(x):
+    """
+    Evaluates the current encrypted attention and feed-forward layer.
+    @param x: Encrypted hidden-state ciphertext array for the current layer.
+    @return: Tuple containing encrypted layer output and stage intermediates.
+    """
     global engine, evaluator, thor_attention,thor_ff, layer_idx, thor_attention_mask
     
     thor_attention.to(devices)
@@ -525,6 +566,14 @@ fhe_layer_times = {}
 h_indices = [np.where(np.arange(0, 2**11) % 16 == i) for i in range(12)]
 
 def plot_variables(variables, i=0, j=0, h=0):
+    """
+    Plots encrypted intermediate values against plaintext BERT references.
+    @param variables: Encrypted intermediate arrays returned by forward_layer.
+    @param i: Ciphertext index selected from each intermediate array.
+    @param j: Packed diagonal block index selected for decryption.
+    @param h: Attention head or hidden block selected for comparison.
+    @return: None.
+    """
     global layer_idx, sk, h_indices, engine, dd
 
     variable_names = [
