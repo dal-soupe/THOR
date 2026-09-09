@@ -285,7 +285,7 @@ class GLEngine(GLEngine):
     def cc_sub(self, a: GLCiphertext, b: GLCiphertext) -> GLCiphertext:
         return super().subtract(a, b)
 
-    def auto_level(self, a: FheData, b: FheData) -> tuple[FheData, FheData]:
+    def auto_level(self, a: FheData, b: FheData) -> tuple[FheData, FheData]: # type: ignore
         target = min(a.level, b.level)
         if a.level != target:
             a = self._change_data_level(a, target)
@@ -293,7 +293,7 @@ class GLEngine(GLEngine):
             b = self._change_data_level(b, target)
         return a, b
 
-    def _change_data_level(self, value: FheData, level: int) -> FheData:
+    def _change_data_level(self, value: FheData, level: int) -> FheData: # type: ignore
         return super().level_down(value, level)
 
     def conjugate(
