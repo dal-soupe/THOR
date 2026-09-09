@@ -267,6 +267,7 @@ class GLEngine(GLEngine):
         return super().add(a, b)
 
     def auto_cc_add(self, a: GLCiphertext, b: GLCiphertext) -> GLCiphertext:
+        a, b = self.auto_level(a, b)
         return self.cc_add(a, b)
 
     def mc_sub(self, message: Any, ciphertext: GLCiphertext) -> GLCiphertext:

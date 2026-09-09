@@ -6,7 +6,11 @@ from typing import Any, Mapping
 import numpy as np
 from functools import partial
 import time
-import torch
+
+try:
+    import torch
+except ImportError:  # Torch is optional for CPU-only GL use.
+    torch = None
 
 from .linear import ThorLinearEvaluator
 from .tensor import GLTensor
@@ -102,10 +106,12 @@ class ThorModule:
         self.evaluator = evaluator
         self.engine = evaluator.engine
         self.weights = weights
+        self._configured = bool(weights)
+        self.devices = []
 
     def to(self, devices: list[int] | None = None) -> ThorModule:
         """GL objects remain owned by the mode/device selected by their engine."""
-        return self
+        self.devices = devices
 
     def cpu(self) -> ThorModule:
         """GL objects cannot be transferred between engine backends in place."""
@@ -120,12 +126,7 @@ class ThorModule:
 
 
 class ThorBert:
-    """Twelve-layer BERT layout scaffold for GL tensors.
-
-    The logical layouts are defined and validated here, but encrypted inference
-    is intentionally unavailable until block multiplication and low-depth
-    nonlinear evaluation replace the former CKKS/bootstrap implementation.
-    """
+    """Twelve-layer BERT evaluator for GL tensors."""
 
     n_layers = 12
 
@@ -134,21 +135,28 @@ class ThorBert:
         evaluator: ThorLinearEvaluator,
         weights: Mapping[str, Any],
         max_layer_batch: int = 2,
+        n_layers: int | None = None,
     ) -> None:
         if max_layer_batch <= 0:
             raise ValueError("max_layer_batch must be positive")
+        if n_layers is not None and not 1 <= n_layers <= ThorBert.n_layers:
+            raise ValueError(
+                f"n_layers must be between 1 and {ThorBert.n_layers}"
+            )
         self.evaluator = evaluator
         self.engine = evaluator.engine
         self.layout = BertGLLayout(tuple(int(value) for value in self.engine.shape))
         self.weights = weights
+        self._configured = bool(weights)
         self.max_layer_batch = max_layer_batch
+        self.active_layers = n_layers or ThorBert.n_layers
         self.attentions = [
             ThorBertAttention(evaluator, weights, layer)
-            for layer in range(self.n_layers)
+            for layer in range(self.active_layers)
         ]
         self.ffs = [
             ThorBertFF(evaluator, weights, layer)
-            for layer in range(self.n_layers)
+            for layer in range(self.active_layers)
         ]
         self.pooler = ThorBertPooler(evaluator, weights)
         self.classifier = ThorBertClassifier(evaluator, weights)
@@ -177,6 +185,8 @@ class ThorBert:
             self.layout.ATTENTION_MASK_SHAPE,
             "attention_mask",
         )
+        if not self._configured:
+            ThorModule._deferred("BERT forward")
         if debug:
             if sk is None:
                 raise ValueError("Please provide secret key")
@@ -189,14 +199,21 @@ class ThorBert:
         # if x.shape != (4,):
         #     raise ValueError("Input of bert should be (8,)")
         
-        for i in range(self.n_layers//self.max_layer_batch):
+        for i in range(
+            (self.active_layers + self.max_layer_batch - 1)
+            // self.max_layer_batch
+        ):
             for j in range(i*self.max_layer_batch, (i+1)*self.max_layer_batch):
+                if j >= self.active_layers:
+                    break
                 self.attentions[j].to(devices)
                 self.ffs[j].to(devices)
-                if self.engine.mode == "gpu":
+                if self.engine.mode == "gpu" and torch is not None:
                     print(f"Memory allocated to GPU: {torch.cuda.memory_allocated(devices[0]) /1024**3:.2f} GB after layer {j} allocation: ")
                 
             for j in range(i*self.max_layer_batch, (i+1)*self.max_layer_batch):
+                if j >= self.active_layers:
+                    break
                 print(f"Forwarding layer: {j}")
                 temp = time.time()
                 x = self.attentions[j].forward(x, attention_mask, debug=debug, sk=sk)
@@ -204,9 +221,11 @@ class ThorBert:
                 print(f"Time taken for layer {j} forward: {time.time() - temp:.2f} seconds")
             
             for j in range(i*self.max_layer_batch, (i+1)*self.max_layer_batch):
+                if j >= self.active_layers:
+                    break
                 self.attentions[j].cpu()
                 self.ffs[j].cpu()
-                if self.engine.mode == "gpu":
+                if self.engine.mode == "gpu" and torch is not None:
                     print(f"Memory allocated to GPU: {torch.cuda.memory_allocated(devices[0]) /1024**3:.2f} GB after layer {j} release: ")
                 
         self.pooler.to(devices)
@@ -228,11 +247,13 @@ class ThorBertAttention(ThorModule):
         if not 0 <= layer_idx < ThorBert.n_layers:
             raise ValueError(f"layer_idx must be between 0 and {ThorBert.n_layers - 1}")
         self.engine = evaluator.engine
-        self.secret_key = self.engine.create_secret_key()
-        self.engine.mmult_key = self.engine.create_matrix_multiplication_key(self.secret_key)
-        self.engine.transp_key = self.engine.create_transposition_key(self.secret_key)
+        self.layout = BertGLLayout(tuple(int(value) for value in self.engine.shape))
+        # Keys are owned by the caller/engine and must match the input
+        # ciphertext's secret key. Component construction must not replace them.
+        self.secret_key = getattr(self.engine, "sk", None)
         self.layer_idx = layer_idx
         self.weights = {}
+
         for qkv in ['query', 'key', 'value']:
             self.weights[f"{qkv}.weight"] = weights[f'bert.encoder.layer.{layer_idx}.attention.self.{qkv}.weight']
             self.weights[f"{qkv}.bias"] = weights[f'bert.encoder.layer.{layer_idx}.attention.self.{qkv}.bias']
@@ -248,53 +269,74 @@ class ThorBertAttention(ThorModule):
                             'LayerNorm.weight', 'LayerNorm.bias']
 
         self.softmax = partial(he_softmax2, engine=self.engine) if layer_idx == 2 else partial(he_softmax1, engine=self.engine)
-        self.layernorm = partial(he_layernorm1, engine=self.engine, gamma=self.weights['LayerNorm.weight'], beta=self.weights['LayerNorm.bias'])
+        self.layernorm = partial(
+            he_layernorm1,
+            engine=self.engine,
+            gamma=self.weights['LayerNorm.weight'],
+            beta=self.weights['LayerNorm.bias'],
+        )
         self.devices = []
 
     def forward(self, x: GLTensor, attention_mask: GLTensor, debug=False, sk=None) -> GLTensor:
-        input_lev = x[0].level
+        self.layout.require_shape(x, self.layout.HIDDEN_SHAPE, "hidden_state")
+        self.layout.require_shape(
+            attention_mask,
+            self.layout.ATTENTION_MASK_SHAPE,
+            "attention_mask",
+        )
         
         q = self.query(x)
         k = self.key(x)
         v = self.value(x)
-
-        l_k = self.evaluator.transpose_upper_to_lower(k)
         
-        sftmx_scale = 1
         att_score = self.calculate_attention_score(q, k)
-        att_prob = self.softmax(x=att_score, attention_mask=attention_mask, rescale=False, debug=debug, sk=sk) #Returns att_prob, already copied.
+        att_prob = GLTensor(
+            self.softmax(
+                x=att_score.payload,
+                attention_mask=attention_mask.payload,
+                rescale=False,
+                debug=debug,
+                sk=sk,
+            ),
+            self.layout.ATTENTION_SCORE_SHAPE,
+            self.layout.physical_shape,
+        )
 
-        att_context = self.calculate_attention_context(v, att_prob)
+        att_context = self.calculate_attention_context(att_prob, v)
         dense_output = self.dense(att_context)
-        
-        x_out_sum = np.full((8,), None, dtype=object)
 
-        x = self.layernorm(x=dense_output, debug=False, sk=sk)
-        return x
+        residual, projected = self.engine.auto_level(
+            x.payload, dense_output.payload
+        )
+        x=self.engine.cc_add(residual, projected)
+        normalized = self.layernorm(x=x, debug=debug, sk=sk)
+        return GLTensor(
+            normalized, self.layout.HIDDEN_SHAPE, self.layout.physical_shape
+        )
 
     def query(self, hidden_state: GLTensor) -> GLTensor:
-        
+        self.layout.require_shape(
+            hidden_state, self.layout.HIDDEN_SHAPE, "hidden_state"
+        )
         wx = self.engine.mmult(self.weights['query.weight'], hidden_state.payload)
-        
-        q = np.full(wx.shape, 0.0)
-        self.engine.add(self.weights['query.bias'], wx)
-        return q
+        q = self.engine.pc_add(self.weights['query.bias'], wx)
+        return GLTensor(q, self.layout.HEAD_SHAPE, self.layout.physical_shape)
 
     def key(self, hidden_state: GLTensor) -> GLTensor:
-        
+        self.layout.require_shape(
+            hidden_state, self.layout.HIDDEN_SHAPE, "hidden_state"
+        )
         wx = self.engine.mmult(self.weights['key.weight'], hidden_state.payload)
-        
-        k = np.full(wx.shape, 0.0)
-        self.engine.add(self.weights['key.bias'], wx)
-        return k
+        k = self.engine.pc_add(self.weights['key.bias'], wx)
+        return GLTensor(k, self.layout.HEAD_SHAPE, self.layout.physical_shape)
 
     def value(self, hidden_state: GLTensor) -> GLTensor:
-        
+        self.layout.require_shape(
+            hidden_state, self.layout.HIDDEN_SHAPE, "hidden_state"
+        )
         wx = self.engine.mmult(self.weights['value.weight'], hidden_state.payload)
-        
-        v = np.full(wx.shape, 0.0)
-        self.engine.add(self.weights['value.bias'], wx)
-        return v
+        v = self.engine.pc_add(self.weights['value.bias'], wx)
+        return GLTensor(v, self.layout.HEAD_SHAPE, self.layout.physical_shape)
 
     def calculate_attention_score(self, query: GLTensor, key: GLTensor) -> GLTensor:
         """
@@ -309,7 +351,11 @@ class ThorBertAttention(ThorModule):
         fact = 1 / np.sqrt(query.logical_shape[-1])
         probabilities = self.engine.mult_scalar(probabilities, fact)
 
-        return probabilities
+        return GLTensor(
+            probabilities,
+            self.layout.ATTENTION_SCORE_SHAPE,
+            self.layout.physical_shape,
+        )
     
     def calculate_attention_context(
         self,
@@ -323,16 +369,15 @@ class ThorBertAttention(ThorModule):
         @return: output, GLTensor with logical shape 
         """
         output = self.engine.mmult(probabilities.payload, value.payload)
-        return output
+        return GLTensor(
+            output, self.layout.HEAD_SHAPE, self.layout.physical_shape
+        )
 
     def dense(self, context: GLTensor) -> GLTensor:
+        self.layout.require_shape(context, self.layout.HEAD_SHAPE, "context")
         wx = self.engine.mmult(self.weights['dense.weight'], context.payload)
-        
-        if wx.shape[0] != ???:
-            raise ValueError("Shape of wx should be ?? but got {}".format(wx.shape))
-        
         wx = self.engine.pc_add(self.weights['dense.bias'], wx)
-        return wx
+        return GLTensor(wx, self.layout.HIDDEN_SHAPE, self.layout.physical_shape)
 
 
 class ThorBertFF(ThorModule):
@@ -345,16 +390,96 @@ class ThorBertFF(ThorModule):
         super().__init__(evaluator, weights)
         if not 0 <= layer_idx < ThorBert.n_layers:
             raise ValueError(f"layer_idx must be between 0 and {ThorBert.n_layers - 1}")
+        self.layout = BertGLLayout(tuple(int(value) for value in self.engine.shape))
         self.layer_idx = layer_idx
+        prefix = f"bert.encoder.layer.{layer_idx}"
+        self.weights = (
+            {
+                "dense1.weight": weights[f"{prefix}.intermediate.dense.weight"],
+                "dense1.bias": weights[f"{prefix}.intermediate.dense.bias"],
+                "dense2.weight": weights[f"{prefix}.output.dense.weight"],
+                "dense2.bias": weights[f"{prefix}.output.dense.bias"],
+                "LayerNorm.weight": weights[f"{prefix}.output.LayerNorm.weight"],
+                "LayerNorm.bias": weights[f"{prefix}.output.LayerNorm.bias"],
+            }
+            if weights
+            else {}
+        )
+        self.keys = list(self.weights)
+        self.gelu = partial(he_gelu, engine=self.engine)
+        layernorm = he_layernorm3 if layer_idx in (9, 10) else he_layernorm2
+        self.layernorm = partial(
+            layernorm,
+            engine=self.engine,
+            gamma=self.weights.get("LayerNorm.weight"),
+            beta=self.weights.get("LayerNorm.bias"),
+        )
+        self.devices = []
 
-    def forward(self, hidden_state: GLTensor, **_: Any) -> GLTensor:
-        self._deferred("feed-forward layer")
+    def forward(
+        self,
+        hidden_state: GLTensor,
+        debug: bool = False,
+        sk: Any = None,
+        **_: Any,
+    ) -> GLTensor:
+        """Evaluate dense, GELU, dense, residual, and layer normalization."""
+        self.layout.require_shape(
+            hidden_state, self.layout.HIDDEN_SHAPE, "hidden_state"
+        )
+        intermediate = self.dense1(hidden_state)
+        activated = GLTensor(
+            self.gelu(x=intermediate.payload, sk=sk),
+            self.layout.INTERMEDIATE_SHAPE,
+            self.layout.physical_shape,
+        )
+        projected = self.dense2(activated)
+
+        residual, update = self.engine.auto_level(
+            hidden_state.payload, projected.payload
+        )
+        normalized = self.layernorm(
+            x=self.engine.cc_add(residual, update),
+            debug=debug,
+            sk=sk,
+        )
+        return GLTensor(
+            normalized, self.layout.HIDDEN_SHAPE, self.layout.physical_shape
+        )
 
     def dense1(self, hidden_state: GLTensor) -> GLTensor:
-        self._deferred("feed-forward expansion")
+        """Project hidden states from 768 to 3072 features and add bias."""
+        self.layout.require_shape(
+            hidden_state, self.layout.HIDDEN_SHAPE, "hidden_state"
+        )
+        projected = self.engine.mmult(
+            self.weights["dense1.weight"], hidden_state.payload
+        )
+        projected = self.engine.pc_add(
+            self.weights["dense1.bias"], projected
+        )
+        return GLTensor(
+            projected,
+            self.layout.INTERMEDIATE_SHAPE,
+            self.layout.physical_shape,
+        )
 
     def dense2(self, intermediate: GLTensor, **_: Any) -> GLTensor:
-        self._deferred("feed-forward contraction")
+        """Project intermediate states from 3072 back to 768 features."""
+        self.layout.require_shape(
+            intermediate,
+            self.layout.INTERMEDIATE_SHAPE,
+            "intermediate",
+        )
+        projected = self.engine.mmult(
+            self.weights["dense2.weight"], intermediate.payload
+        )
+        projected = self.engine.pc_add(
+            self.weights["dense2.bias"], projected
+        )
+        return GLTensor(
+            projected, self.layout.HIDDEN_SHAPE, self.layout.physical_shape
+        )
 
 
 class ThorBertPooler(ThorModule):

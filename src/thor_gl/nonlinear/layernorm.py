@@ -1,131 +1,155 @@
+from __future__ import annotations
+
+import math
+
 import numpy as np
 
-from ..gl import GLEngine
+from ..gl import FheData, GLEngine
+from .polynomial import evaluate_poly_deg4
 
-def he_layernorm1(engine: GLEngine, x, gamma ,beta ,var_e = 10**(-5),min_var = 0.15,max_var = 10,  debug=False, sk=None):
-    return he_layernorm(engine, x, gamma, beta, var_e, min_var, max_var, debug=debug, sk=sk)
 
-def he_layernorm2(engine: GLEngine, x, gamma ,beta ,var_e = 10**(-5),min_var = 0.2,max_var = 150,  debug=False, sk=None):
-    return he_layernorm(engine, x, gamma, beta, var_e, min_var, max_var,n=768, debug=debug, sk=sk)
+# Third-order Taylor approximation to 1/sqrt(x) around x=1.
+_INV_SQRT_COEFFICIENTS = np.array(
+    [2.1875, -2.1875, 1.3125, -0.3125]
+)
 
-def he_layernorm3(engine: GLEngine, x, gamma ,beta ,var_e = 10**(-5),min_var = 0.75,max_var = 2500,  debug=False, sk=None):
-    return he_layernorm(engine, x, gamma, beta, var_e, min_var, max_var,n=768, debug=debug, sk=sk)
 
-def he_layernorm(engine: GLEngine, l,gamma,beta, var_e,min_var, max_var,n=768, debug=False, sk=None):
-    if min_var <= 0.16:
-        name = 'ln1'
-    elif min_var >= 0.74:
-        name = 'ln3'
-    else:
-        name = 'ln2'
-    epsilon_var1 = min_var/max_var
-    w_buffer=1.05
-    max_for_denominator = (max_var*w_buffer+var_e)*n**2
-    
-    mask = np.array(([1/max_for_denominator**(1/2)]*6+[0]*10)*2**11)
-    if name != 'ln1':
-        mask = mask/2
-    enc_l = [engine.cm_mult(ct, mask) for ct in l]
-    
-    
-    #Compute n * sigma(x)
-    sum_x = enc_l[0]
-    for i in range(1,len(enc_l)):
-        sum_x = engine.add(sum_x, enc_l[i])
-    sum_x= engine.rotsum(sum_x, 2**11)
-    sum_x=engine.add(sum_x,engine.rotate_left(sum_x,1))
-    sum_x=engine.add(sum_x,engine.rotate_left(sum_x,2))
-    sum_x=engine.add(sum_x,engine.rotate_left(sum_x,4))
-    mask = np.array(([1]*1+[0]*15)*2**11)
-    sum_x = engine.cm_mult(sum_x,mask)
-    #Compute sigma(x)^2 on the first slot
-    sq_sum_x = engine.square_elts(sum_x)  
-    #Rotations to Spread the Square of the Sum Across Slots
-    sum_x = engine.add(sum_x,engine.rotate_left(sum_x,-1))
-    sum_x = engine.add(sum_x,engine.rotate_left(sum_x,-2))
-    sum_x = engine.add(sum_x,engine.rotate_left(sum_x,-4))
-    
-    #Compute numerator n*x - sigma(x)
-    nx = [engine.mult_int_scalar(ct, n) for ct in enc_l]
-    if nx[0].level < sum_x.level:
-        sum_x = engine.level_down(sum_x, nx[0].level)
-    numerator = [engine.sub(ct, sum_x) for ct in nx]
-    
-    #Compute sigma(x**2)
-    sigma_x2 = engine.square_elts(enc_l[0])
-    for i in range(1,len(enc_l)):
-        sigma_x2 = engine.add(sigma_x2, engine.square_elts(enc_l[i]))
-    sigma_x2 = engine.rotsum(sigma_x2, 2**11)
-    sigma_x2=engine.add(sigma_x2,engine.rotate_left(sigma_x2,1))
-    sigma_x2=engine.add(sigma_x2,engine.rotate_left(sigma_x2,2))
-    sigma_x2=engine.add(sigma_x2,engine.rotate_left(sigma_x2,4))
-    sigma_x2 = engine.cm_mult(sigma_x2,mask)
-    
-    #Compute variance 
-    n_sigma_x2 = engine.mult_int_scalar(sigma_x2, n)
-    variance = engine.sub(n_sigma_x2,sq_sum_x)
-    variance = engine.add_scalar(variance, var_e/max_for_denominator)
-    
-    #Encrypt one
-    enc_one = engine.encode_and_encrypt(mask, level=variance.level)
-    
-    #Compute Inverse Square Root
-    #Rotations to spread the Inverse Square Root Across Slots
-    
-    denominator = he_invsqrt(engine, enc_one,variance,epsilon_var1,alpha=0.001,mask=mask)
-    if name == 'ln1':
-        if denominator.level < 7:
-            denominator = engine.bootstrap(denominator)
-    else:
-        if denominator.level < 10:
-            denominator = engine.bootstrap(denominator)
-    denominator = engine.add(denominator,engine.rotate_left(denominator,-1))
-    denominator = engine.add(denominator,engine.rotate_left(denominator,-2))
-    denominator = engine.add(denominator,engine.rotate_left(denominator,-4))
-    
-    #Compute LayerNorm by dividing the numerator by the denominator
-    layernorm_x = np.full((8,), None, dtype=object)
-    for i in range(4):
-        layernorm_x[i] = engine.auto_ct_ct_mult(numerator[i],
-                                                engine.rescale(engine.pt_ct_mult(gamma[i],denominator))
-                                                )
-        layernorm_x[i+4] = engine.auto_ct_ct_mult(numerator[i+4], 
-                                                   engine.rescale(engine.pt_ct_mult(gamma[i+4],denominator))
-                                                   )
+def _payload(value):
+    return getattr(value, "payload", value)
 
-        layernorm_x[i] = engine.pc_add(beta[i], layernorm_x[i])
-        layernorm_x[i+4] = engine.pc_add(beta[i+4],layernorm_x[i+4])
-        
-        # Since encoding is done as 1/2
-        layernorm_x[i] = engine.cc_add(layernorm_x[i], layernorm_x[i])  
-        layernorm_x[i+4] = engine.cc_add(layernorm_x[i+4], layernorm_x[i+4]) 
-    return layernorm_x
 
-def he_invsqrt(engine: GLEngine, numerator, denominator,e,alpha, mask=np.array(([1]*1+[0]*15)*2**11)):
-    d=0
-    an=denominator
-    bn=numerator
-    en=e
-    while en<1-alpha:
-        d=d+1
-        kn=np.roots([1-en**3,6*en**2-6,9-9*en])[1] # find kn s.t. f(kn*en)=f(kn*1)
-        bn1=engine.cm_mult(bn, (kn**(3/2)/2)*mask)
-        if an.level < 4 or bn.level < 4:
-            an = engine.mult_int_scalar(an,2**6)
-            an = engine.bootstrap(an)
-            an = engine.mult_scalar(an, 1/2**6)
-            bn1 = engine.intt(bn1)
-            bn1 = engine.bootstrap(bn1)
-            bn1 = engine.mult_scalar(bn1,2**0)
-            
-        an, bn1 = engine.auto_level(an, bn1)
-        bn2=engine.mc_sub((3/kn)*mask, an)
-        bn1, bn2 = engine.auto_level(bn1, bn2)
-        bn=engine.auto_ct_ct_mult(bn1,bn2)
+def _sum_last_axis(engine: GLEngine, value: FheData) -> FheData:
+    width = int(engine.shape[-1])
+    if width <= 0 or width & (width - 1):
+        raise ValueError("the last GL dimension must be a positive power of two")
+    result = value
+    shift = 1
+    while shift < width:
+        result = engine.cc_add(
+            result, engine.rotate_left(result, shift, axis=2)
+        )
+        shift *= 2
+    return result
 
-        an1=engine.cm_mult(an,(kn**3/4)*mask)
-        an2=engine.square_elts(engine.mc_sub((3/kn)*mask,an))
-        an=engine.auto_ct_ct_mult(an1,an2) 
-        
-        en=kn*en*(3-kn*en)**2/4
-    return bn
+
+def he_layernorm1(
+    engine: GLEngine,
+    x,
+    gamma,
+    beta,
+    var_e=1e-5,
+    min_var=0.15,
+    max_var=10.0,
+    debug=False,
+    sk=None,
+):
+    return he_layernorm(
+        engine, x, gamma, beta, var_e, min_var, max_var, debug=debug, sk=sk
+    )
+
+
+def he_layernorm2(
+    engine: GLEngine,
+    x,
+    gamma,
+    beta,
+    var_e=1e-5,
+    min_var=0.2,
+    max_var=150.0,
+    debug=False,
+    sk=None,
+):
+    return he_layernorm(
+        engine, x, gamma, beta, var_e, min_var, max_var, debug=debug, sk=sk
+    )
+
+
+def he_layernorm3(
+    engine: GLEngine,
+    x,
+    gamma,
+    beta,
+    var_e=1e-5,
+    min_var=0.75,
+    max_var=2500.0,
+    debug=False,
+    sk=None,
+):
+    return he_layernorm(
+        engine, x, gamma, beta, var_e, min_var, max_var, debug=debug, sk=sk
+    )
+
+
+def he_layernorm(
+    engine: GLEngine,
+    x,
+    gamma,
+    beta,
+    var_e,
+    min_var,
+    max_var,
+    n=768,
+    debug=False,
+    sk=None,
+):
+    """Normalize each row of every physical GL matrix."""
+    del n
+    if debug and sk is None:
+        raise ValueError("sk must be provided for debug mode")
+    if min_var <= 0 or max_var <= min_var:
+        raise ValueError("variance bounds must satisfy 0 < min_var < max_var")
+
+    value = _payload(x)
+    width = int(engine.shape[-1])
+    mean = engine.mult_scalar(_sum_last_axis(engine, value), 1.0 / width)
+    value, mean = engine.auto_level(value, mean)
+    centered = engine.cc_sub(value, mean)
+
+    squared = engine.square_elts(centered)
+    variance = engine.mult_scalar(
+        _sum_last_axis(engine, squared), 1.0 / width
+    )
+    variance = engine.add_scalar(variance, var_e)
+
+    reference_variance = math.sqrt(min_var * max_var)
+    normalized_variance = engine.mult_scalar(
+        variance, 1.0 / reference_variance
+    )
+    inverse_std = he_invsqrt(
+        engine,
+        normalized_variance,
+        reference_variance=reference_variance,
+    )
+    # inverse_std = engine.bootstrap(inverse_std)  # GL bootstrap disabled.
+
+    normalized = engine.auto_ct_ct_hmult(centered, inverse_std)
+    scaled = engine.hmult(normalized, _payload(gamma))
+    return engine.pc_add(_payload(beta), scaled)
+
+
+def he_invsqrt(
+    engine: GLEngine,
+    numerator: FheData,
+    denominator: FheData | None = None,
+    e=None,
+    alpha=None,
+    mask=None,
+    *,
+    reference_variance: float = 1.0,
+):
+    """Evaluate a degree-three inverse-square-root approximation."""
+    del e, alpha, mask
+    value = numerator if denominator is None else denominator
+    result = evaluate_poly_deg4(
+        engine, _INV_SQRT_COEFFICIENTS, value
+    )
+    return engine.mult_scalar(result, 1.0 / math.sqrt(reference_variance))
+
+
+__all__ = [
+    "he_invsqrt",
+    "he_layernorm",
+    "he_layernorm1",
+    "he_layernorm2",
+    "he_layernorm3",
+]
