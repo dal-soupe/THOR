@@ -10,6 +10,13 @@ from .nonlinear.gelu import he_gelu#, he_gelu2
 from .nonlinear.softmax import he_softmax1, he_softmax2
 from .nonlinear.layernorm import he_layernorm1, he_layernorm2, he_layernorm3
 from .nonlinear.tanh import he_tanh
+
+import logging
+loggers = [logging.getLogger(name) for name in logging.root.manager.loggerDict]
+for logger in loggers:
+    if "transformers" in logger.name.lower():
+        logger.setLevel(logging.ERROR)
+
         
 class ThorModule:
     def __init__(self) -> None:
