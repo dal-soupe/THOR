@@ -15,10 +15,14 @@ import numpy as np
 import torch
 from transformers import BertForNextSentencePrediction
 
-from thor import CkksEngine, ThorDataEncryptor, ThorLinearEvaluator
-from thor.bert import ThorBertAttention, ThorBertFF
-
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+from thor import CkksEngine, ThorDataEncryptor, ThorLinearEvaluator
+from thor.bert import (
+        ThorBertAttention,
+        ThorBertClassifier,
+        ThorBertFF,
+        ThorBertPooler,
+    )
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -35,7 +39,12 @@ def main() -> None:
         default=Path("encoded_models_split17_new"),
     )
     parser.add_argument("--sample", type=int, default=0)
-    parser.add_argument("--layer", type=int, default=0)
+    parser.add_argument(
+        "--layer",
+        type=int,
+        default=0,
+        help="Encoder layer to evaluate (use 11 for the final encoder layer)",
+    )
     parser.add_argument(
         "--max-tokens",
         type=int,
@@ -100,16 +109,27 @@ def main() -> None:
     if not ff_path.exists():
         ff_path = model_dir / "ff.pkl"
     ff_weights = engine.load_plaintext_weights(ff_path)
+    pooler_weights = engine.load_plaintext_weights(model_dir / "pooler.pkl")
+    classifier_weights = engine.load_plaintext_weights(model_dir / "cls.pkl")
 
     evaluator = ThorLinearEvaluator(engine)
     attention = ThorBertAttention(evaluator, attention_weights, args.layer)
     feed_forward = ThorBertFF(evaluator, ff_weights, args.layer)
-    hidden = attention.forward(encrypted_hidden, attention_mask)
-    output = feed_forward.forward(hidden)
+    hidden = attention.forward(encrypted_hidden, attention_mask, debug=True, sk=secret_key)
+    output = feed_forward.forward(hidden, debug=True, sk=secret_key)
+    pooler = ThorBertPooler(evaluator, pooler_weights)
+    classifier = ThorBertClassifier(evaluator, classifier_weights)
+    pooled = pooler.forward(output)
+    logits = classifier.forward(pooled)
+
 
     decoded_output = [
         np.asarray(engine.decrypt(value, secret_key)).real for value in output
     ]
+    decoded_logits = np.asarray(
+        [np.asarray(engine.decrypt(value, secret_key)).real[0] for value in logits]
+    )
+    prediction = int(np.argmax(decoded_logits))
     values = np.concatenate([decoded[:8] for decoded in decoded_output])
 
     print("\nInput example")
@@ -119,27 +139,11 @@ def main() -> None:
     else:
         print(f"sentence: {raw_sample['sentence']}")
     print(f"label: {raw_sample['label']}")
-
-    token_ids = batch["input_ids"][0].tolist()
-    token_mask = batch["attention_mask"][0].tolist()
-    tokens = data.tokenizer.convert_ids_to_tokens(token_ids)
-    print("\nTokens and representative decoded output slots")
     print(
-        "Each row uses packed slot index*16; these are hidden-state values, "
-        "not decoded text."
+        f"prediction from layer {args.layer} output: {prediction}; "
+        f"logits: {decoded_logits}"
     )
-    print("index token id mask packed-slot output[0:8]")
-    for index, (token, token_id, mask_value) in enumerate(
-        zip(tokens, token_ids, token_mask)
-    ):
-        if index >= args.max_tokens:
-            break
-        slot = index * 16
-        packed_values = [decoded[slot] for decoded in decoded_output]
-        print(
-            f"{index:5d} {token:>16s} {token_id:6d} {mask_value:4d} "
-            f"{np.asarray(packed_values)}"
-        )
+
     print(f"dataset: {args.dataset_type}; layer: {args.layer}; sample: {args.sample}")
     print(f"output ciphertexts: {len(output)}")
     print(f"output level: {output[0].level}")

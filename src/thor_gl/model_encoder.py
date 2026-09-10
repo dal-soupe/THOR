@@ -30,7 +30,7 @@ class ThorModelEncoder:
             self.encode_cls()
 
     def save(self, filename: str) -> None:
-        raise NotImplementedError("GL plaintext serialization is not exposed by DesiloFHE")
+        self.gl_engine.save_plaintext_weights(self.weights_pt, filename)
             
     def encode_att(self, layer:int):
         for qkv in ['query', 'key', 'value']:

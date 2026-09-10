@@ -27,16 +27,16 @@ def parse_args() -> argparse.Namespace:
         help="Fine-tuned model subdirectories to encode",
     )
     parser.add_argument(
-        "--model-root",
+        "--data-dir",
         type=Path,
-        default=Path("finetuned_models"),
-        help="Directory containing <dataset-type>/model.safetensors",
+        default=Path("~/data/THOR/"),
+        help="Root directory containing <dataset-type>/model.safetensors",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         default=None,
-        help="Destination directory; defaults to backend-specific locations",
+        help="Destination; defaults to <data-dir>/encoded_models_<backend>",
     )
     parser.add_argument(
         "--mode",
@@ -63,9 +63,9 @@ def encode_ckks(args: argparse.Namespace, output_dir: Path) -> None:
 
     mode = args.mode or os.environ.get("THOR_FHE_MODE", "gpu")
     engine = CkksEngine(mode=mode, use_bootstrap_to_17_levels=True)
-    model_root = args.model_root.expanduser()
+    data_dir = args.data_dir.expanduser()
     for dataset_type in args.dataset_type:
-        model_path = model_root / dataset_type / "model.safetensors"
+        model_path = data_dir / dataset_type / "model.safetensors"
         out_dir = output_dir / dataset_type
         out_dir.mkdir(parents=True, exist_ok=True)
         encoder = ThorModelEncoder(engine, str(model_path))
@@ -108,9 +108,9 @@ def encode_gl(args: argparse.Namespace, output_dir: Path) -> None:
         mode=mode,
         device_id=args.device_id,
     )
-    model_root = args.model_root.expanduser()
+    data_dir = args.data_dir.expanduser()
     for dataset_type in args.dataset_type:
-        model_path = model_root / dataset_type / "model.safetensors"
+        model_path = data_dir / "finetuned_models" / dataset_type / "model.safetensors"
         out_dir = output_dir / dataset_type
         out_dir.mkdir(parents=True, exist_ok=True)
 
