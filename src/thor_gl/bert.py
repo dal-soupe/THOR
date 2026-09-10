@@ -254,13 +254,14 @@ class ThorBertAttention(ThorModule):
         self.layer_idx = layer_idx
         self.weights = {}
 
-        for qkv in ['query', 'key', 'value']:
-            self.weights[f"{qkv}.weight"] = weights[f'bert.encoder.layer.{layer_idx}.attention.self.{qkv}.weight']
-            self.weights[f"{qkv}.bias"] = weights[f'bert.encoder.layer.{layer_idx}.attention.self.{qkv}.bias']
-        self.weights['dense.weight'] = weights[f'bert.encoder.layer.{layer_idx}.attention.output.dense.weight']
-        self.weights['dense.bias'] = weights[f'bert.encoder.layer.{layer_idx}.attention.output.dense.bias']
-        self.weights['LayerNorm.weight'] = weights[f'bert.encoder.layer.{layer_idx}.attention.output.LayerNorm.weight']
-        self.weights['LayerNorm.bias'] = weights[f'bert.encoder.layer.{layer_idx}.attention.output.LayerNorm.bias']
+        if weights:
+            for qkv in ['query', 'key', 'value']:
+                self.weights[f"{qkv}.weight"] = weights[f'bert.encoder.layer.{layer_idx}.attention.self.{qkv}.weight']
+                self.weights[f"{qkv}.bias"] = weights[f'bert.encoder.layer.{layer_idx}.attention.self.{qkv}.bias']
+            self.weights['dense.weight'] = weights[f'bert.encoder.layer.{layer_idx}.attention.output.dense.weight']
+            self.weights['dense.bias'] = weights[f'bert.encoder.layer.{layer_idx}.attention.output.dense.bias']
+            self.weights['LayerNorm.weight'] = weights[f'bert.encoder.layer.{layer_idx}.attention.output.LayerNorm.weight']
+            self.weights['LayerNorm.bias'] = weights[f'bert.encoder.layer.{layer_idx}.attention.output.LayerNorm.bias']
         
         self.keys = ['query.weight', 'query.bias', 
                             'key.weight', 'key.bias', 
@@ -272,8 +273,8 @@ class ThorBertAttention(ThorModule):
         self.layernorm = partial(
             he_layernorm1,
             engine=self.engine,
-            gamma=self.weights['LayerNorm.weight'],
-            beta=self.weights['LayerNorm.bias'],
+            gamma=self.weights.get('LayerNorm.weight'),
+            beta=self.weights.get('LayerNorm.bias'),
         )
         self.devices = []
 
