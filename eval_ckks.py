@@ -36,6 +36,12 @@ def main() -> None:
     )
     parser.add_argument("--sample", type=int, default=0)
     parser.add_argument("--layer", type=int, default=0)
+    parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=128,
+        help="Maximum number of token rows to print (default: 128)",
+    )
     parser.add_argument("--mode", choices=("cpu", "gpu"), default=None)
     parser.add_argument("--device-id", type=int, default=0)
     parser.add_argument("--checkpoint", default="bert-base-uncased")
@@ -65,7 +71,7 @@ def main() -> None:
         str(dataset_path),
         embedding_model=embedding_model,
         ckks_engine=engine,
-        test=True,
+        test=False,
     )
     batch = None
     for sample_index, candidate in enumerate(data.eval_dataloader):
@@ -74,6 +80,7 @@ def main() -> None:
             break
     if batch is None:
         raise SystemExit(f"Validation split has no sample at index {args.sample}")
+    raw_sample = data.dataset["validation"][args.sample]
 
     inputs = {
         key: value
@@ -100,9 +107,39 @@ def main() -> None:
     hidden = attention.forward(encrypted_hidden, attention_mask)
     output = feed_forward.forward(hidden)
 
-    values = np.concatenate(
-        [np.asarray(engine.decrypt(value, secret_key)).real[:8] for value in output]
+    decoded_output = [
+        np.asarray(engine.decrypt(value, secret_key)).real for value in output
+    ]
+    values = np.concatenate([decoded[:8] for decoded in decoded_output])
+
+    print("\nInput example")
+    if "sentence1" in raw_sample:
+        print(f"sentence1: {raw_sample['sentence1']}")
+        print(f"sentence2: {raw_sample['sentence2']}")
+    else:
+        print(f"sentence: {raw_sample['sentence']}")
+    print(f"label: {raw_sample['label']}")
+
+    token_ids = batch["input_ids"][0].tolist()
+    token_mask = batch["attention_mask"][0].tolist()
+    tokens = data.tokenizer.convert_ids_to_tokens(token_ids)
+    print("\nTokens and representative decoded output slots")
+    print(
+        "Each row uses packed slot index*16; these are hidden-state values, "
+        "not decoded text."
     )
+    print("index token id mask packed-slot output[0:8]")
+    for index, (token, token_id, mask_value) in enumerate(
+        zip(tokens, token_ids, token_mask)
+    ):
+        if index >= args.max_tokens:
+            break
+        slot = index * 16
+        packed_values = [decoded[slot] for decoded in decoded_output]
+        print(
+            f"{index:5d} {token:>16s} {token_id:6d} {mask_value:4d} "
+            f"{np.asarray(packed_values)}"
+        )
     print(f"dataset: {args.dataset_type}; layer: {args.layer}; sample: {args.sample}")
     print(f"output ciphertexts: {len(output)}")
     print(f"output level: {output[0].level}")

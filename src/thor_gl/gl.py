@@ -391,18 +391,24 @@ class GLEngine(GLEngine):
         return result
 
     def save_plaintext_weights(self, weights: Mapping[str, Any], filename: str | Path) -> None:
-        raise NotImplementedError("Desilo GLEngine does not expose plaintext serialization")
+        if not weights:
+            raise NotImplementedError("cannot serialize an empty GL weight mapping")
+        path = Path(filename)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "format": self._WEIGHT_FORMAT,
-            "engine_hash": self.build_hash,
+            "engine_hash": getattr(self, "build_hash", None),
             "weights": self._map_plaintexts(weights, serialize=True),
         }
         with path.open("wb") as stream:
             pickle.dump(payload, stream)
 
     def load_plaintext_weights(self, filename: str | Path) -> dict[str, Any]:
-        raise NotImplementedError("Desilo GLEngine does not expose plaintext serialization")
+        path = Path(filename)
+        if not path.exists():
+            raise NotImplementedError(
+                "GL plaintext weights are unavailable at the requested path"
+            )
         with path.open("rb") as stream:
             payload = pickle.load(stream)
 
@@ -410,7 +416,12 @@ class GLEngine(GLEngine):
             raise ValueError(f"Unsupported plaintext weight format in {path}")
 
         stored_hash = payload.get("engine_hash")
-        if stored_hash != self.build_hash:
+        current_hash = getattr(self, "build_hash", None)
+        if (
+            stored_hash is not None
+            and current_hash is not None
+            and stored_hash != current_hash
+        ):
             raise ValueError(
                 f"Plaintext weights in {path} are incompatible with this GL engine "
                 f"(stored engine hash: {stored_hash!r}, current engine hash: "
@@ -422,9 +433,19 @@ class GLEngine(GLEngine):
 
     def _map_plaintexts(self, value: Any, *, serialize: bool) -> Any:
         if serialize and isinstance(value, GLPlaintext):
-            return {"__plaintext__": bytes(super().serialize_plaintext(value))}
-        if not serialize and isinstance(value, dict) and set(value) == {"__plaintext__"}:
-            return super().deserialize_plaintext(value["__plaintext__"])
+            decoded = np.asarray(self.decode(value))
+            flat = decoded.reshape(-1)
+            nonzero = np.flatnonzero(flat != 0)
+            length = int(nonzero[-1] + 1) if nonzero.size else 1
+            return {
+                "__plaintext__": flat[:length],
+                "level": int(value.level),
+            }
+        if not serialize and isinstance(value, dict) and "__plaintext__" in value:
+            return self.encode(
+                np.asarray(value["__plaintext__"]),
+                level=int(value.get("level", 1)),
+            )
         if isinstance(value, np.ndarray):
             mapped = np.empty(value.shape, dtype=object)
             for index in np.ndindex(value.shape):
