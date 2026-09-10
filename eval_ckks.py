@@ -12,9 +12,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import torch
+from transformers import BertForNextSentencePrediction
+
+from thor import CkksEngine, ThorDataEncryptor, ThorLinearEvaluator
+from thor.bert import ThorBertAttention, ThorBertFF
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
-
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -23,7 +27,7 @@ def main() -> None:
         "--dataset-path",
         type=Path,
         default=None,
-        help="Dataset saved with datasets.save_to_disk (default: datasets/<type>)",
+        help="Dataset saved with datasets.save_to_disk (default: ~/data/THOR/datasets/<type>)",
     )
     parser.add_argument(
         "--encoded-dir",
@@ -36,13 +40,6 @@ def main() -> None:
     parser.add_argument("--device-id", type=int, default=0)
     parser.add_argument("--checkpoint", default="bert-base-uncased")
     args = parser.parse_args()
-
-    # These imports are intentionally lazy so --help works without the ML stack.
-    import torch
-    from transformers import BertForNextSentencePrediction
-
-    from thor import CkksEngine, ThorDataEncryptor, ThorLinearEvaluator
-    from thor.bert import ThorBertAttention, ThorBertFF
 
     mode = args.mode or os.environ.get("THOR_FHE_MODE", "cpu")
     engine = CkksEngine(
@@ -59,7 +56,7 @@ def main() -> None:
     engine.add_conj_key(engine.create_conjugation_key(secret_key))
     engine.add_bs_key(engine.create_bootstrap_key(secret_key))
 
-    dataset_path = args.dataset_path or Path("datasets") / args.dataset_type
+    dataset_path = args.dataset_path or Path("~/data/THOR/datasets") / args.dataset_type
     embedding_model = BertForNextSentencePrediction.from_pretrained(
         args.checkpoint
     ).bert.embeddings

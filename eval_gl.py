@@ -8,6 +8,7 @@ when running a real BERT checkpoint.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 import subprocess
@@ -54,7 +55,7 @@ def make_weights(engine: GLEngine) -> dict[str, object]:
     def encode(values: np.ndarray):
         return engine.encode(values, level=engine.max_level)
 
-    return {
+    weights = {
         f"{LAYER_PREFIX}.attention.self.query.weight": encode(identity),
         f"{LAYER_PREFIX}.attention.self.query.bias": encode(zeros),
         f"{LAYER_PREFIX}.attention.self.key.weight": encode(identity),
@@ -86,9 +87,24 @@ def main() -> None:
         default=0,
         help="Lower levels produce substantially smaller GL rotation keys",
     )
+    parser.add_argument("--dataset-type", default="mrpc")
+    parser.add_argument(
+        "--dataset-path",
+        type=Path,
+        default=None,
+        help="Dataset saved with datasets.save_to_disk (default: ~/data/THOR/datasets/<type>)",
+    )
+    parser.add_argument(
+        "--encoded-dir",
+        type=Path,
+        default=Path("~/data/THOR/encoded_models_gl"),
+    )
     args = parser.parse_args()
 
-    engine = GLEngine(shape=SHAPE, mode=args.mode)
+
+    mode = args.mode or os.environ.get("THOR_FHE_MODE", "cpu")
+    
+    engine = GLEngine(shape=SHAPE, mode=mode)
     print_gpu_memory("After creating GLEngine")
     secret_key = engine.create_secret_key()
     print_gpu_memory("After creating secret key")
